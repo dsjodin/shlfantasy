@@ -37,6 +37,16 @@ export function ModelQuality() {
                 </tr>
               </thead>
               <tbody>
+                {data.archived && (
+                  <tr className="mine">
+                    <td>
+                      {data.archived.name} <small>(v.{data.archived.weeks.join(", ")})</small>
+                    </td>
+                    <td>{num(data.archived.mae, 2)}</td>
+                    <td>{num(data.archived.correlation, 2)}</td>
+                    <td>{Math.round(data.archived.lineup_efficiency * 100)} %</td>
+                  </tr>
+                )}
                 {data.models.map((m) => (
                   <tr key={m.key} className={m.key === "current" ? "mine" : ""}>
                     <td>{m.name}</td>
@@ -48,10 +58,34 @@ export function ModelQuality() {
               </tbody>
             </table>
           </div>
+          {data.tuning_log && data.tuning_log.length > 0 && (
+            <>
+              <h4>Automatisk justering av vikterna</h4>
+              <p className="hint">
+                Efter varje slutrapporterad matchvecka prövas nya vikter på de två senaste veckorna, som de inte tränats på.
+                De tas bara i bruk om de är tydligt bättre.
+              </p>
+              <ul className="tuning-log">
+                {data.tuning_log.map((e) => (
+                  <li key={e.date} className={e.adopted ? "good" : ""}>
+                    <strong>Efter v.{e.week}:</strong> {e.adopted ? "Nya vikter i bruk. " : ""}
+                    {e.reason}
+                    {e.current_mae !== undefined && e.candidate_mae !== undefined && (
+                      <small>
+                        {" "}
+                        (medelfel {num(e.current_mae, 2)} → {num(e.candidate_mae, 2)})
+                      </small>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <p className="hint">
             Hockeypoäng per vecka är väldigt slumpmässiga – även bästa modellen missar mycket för enskilda spelare. Värdet
-            ligger i att välja rätt oftare än man annars hade gjort. Obs: historiska priser finns inte, så backtesten
-            använder dagens pris, vilket ger pris-baserade modeller en viss fördel i efterhand.
+            ligger i att välja rätt oftare än man annars hade gjort. Prognoserna sparas vid varje deadline, så raden
+            ”Sparade prognoser” är en exakt mätning. Övriga rader räknas fram i efterhand och använder dagens pris för
+            veckor innan arkivet fanns, vilket ger pris-baserade modeller en viss fördel.
           </p>
         </>
       )}

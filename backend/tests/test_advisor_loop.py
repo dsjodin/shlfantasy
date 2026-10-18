@@ -55,7 +55,7 @@ def _advisor(model, state, responses):
     advisor = Advisor.__new__(Advisor)
     advisor.model_id = "claude-opus-5-5"
     advisor.effort = "medium"
-    advisor.context = lambda profile: (model, state)
+    advisor.context = lambda profile: (model, state, None)
     advisor.conversations = __import__("collections").OrderedDict()
     advisor.system = SYSTEM_PROMPT
     advisor.tools = TOOLS + [WEB_SEARCH_TOOL]

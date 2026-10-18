@@ -17,6 +17,7 @@ import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
 from . import optimizer
+from .memory import ProfileMemory, transfer_outcomes
 from .model import Model, Player
 from .rules import RULES_TEXT
 from .squad import (
@@ -56,6 +57,17 @@ Så arbetar du:
   att spelaren missade senaste matchen; "injured" betyder skadad.
 - Presentera konkreta förslag som "UT: Namn (lag, pris) → IN: Namn (lag, pris)" med förväntad
   poängvinst och vad som händer med banken.
+
+Minne (per användare):
+- Hämta get_memory innan du ger råd om byten, kapten eller strategi. Där finns användarens sparade
+  preferenser och tidigare byten med faktiskt utfall.
+- Använd historiken för att lära av utfallet: om användaren upprepar ett mönster som tidigare slagit fel
+  (t.ex. köpt spelare på formtopp som sedan dalat), säg det. Ett enskilt byte är dock mest slump – peka
+  på mönster, inte enstaka utfall.
+- Spara med remember när användaren uttrycker en bestående preferens, regel eller plan ("jag vill alltid
+  ha två målvakter från olika lag", "jag sparar Fria Byten till jul"). Spara inte tillfälliga frågor,
+  statistik eller sådant som redan finns i appen. Säg kort att du sparat det.
+- Ta bort en anteckning med forget om användaren ber om det eller om den uppenbart inte gäller längre.
 
 Spelets regler:
 {RULES_TEXT}"""
@@ -130,6 +142,14 @@ class CoachCardsInput(BaseModel):
     weeks: int = Field(6, ge=1, le=12)
 
 
+class RememberInput(BaseModel):
+    note: str = Field(min_length=1, max_length=300)
+
+
+class ForgetInput(BaseModel):
+    note_id: str
+
+
 def _schema(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema(by_alias=True)
     schema.pop("title", None)
@@ -187,6 +207,22 @@ TOOL_SPECS: list[tuple[str, str, type[BaseModel]]] = [
         "per kommande matchvecka med användarens nuvarande trupp, och vilka kort som redan är använda.",
         CoachCardsInput,
     ),
+    (
+        "get_memory",
+        "Hämtar användarens sparade anteckningar (preferenser, regler, planer) och historik över byten som "
+        "gjorts i appen, med faktiskt utfall: poäng för köpta minus sålda spelare sedan bytet, minus avdrag.",
+        NoInput,
+    ),
+    (
+        "remember",
+        "Sparar en kort anteckning om användarens bestående preferens, regel eller plan till framtida samtal.",
+        RememberInput,
+    ),
+    (
+        "forget",
+        "Tar bort en sparad anteckning (id från get_memory).",
+        ForgetInput,
+    ),
 ]
 
 TOOLS = [
@@ -204,6 +240,9 @@ TOOL_LABELS = {
     "find_replacements": "Letar ersättare",
     "get_fixtures": "Kollar matchschemat",
     "coach_cards": "Analyserar coachkort",
+    "get_memory": "Läser minnet",
+    "remember": "Sparar i minnet",
+    "forget": "Glömmer anteckning",
 }
 
 
@@ -212,9 +251,10 @@ class ToolError(Exception):
 
 
 class Toolbox:
-    def __init__(self, model: Model, state: TeamState):
+    def __init__(self, model: Model, state: TeamState, memory: ProfileMemory | None = None):
         self.model = model
         self.state = state
+        self.memory = memory
 
     def resolve(self, query: str) -> Player:
         matches = self.model.find(query)
@@ -355,6 +395,50 @@ class Toolbox:
         self._require_team()
         return {"used_cards": self.state.used_cards, "weeks": card_analysis(self.model, self.state, a.weeks)}
 
+    def _require_memory(self) -> ProfileMemory:
+        if self.memory is None:
+            raise ToolError("Minnet är inte tillgängligt.")
+        return self.memory
+
+    def tool_get_memory(self, _: NoInput) -> dict:
+        memory = self._require_memory()
+        outcomes = transfer_outcomes(self.model, memory.transfers())
+        settled = [t for t in outcomes if t["net_points"] is not None]
+        return {
+            "notes": memory.notes(),
+            "transfers": [
+                {
+                    "gameweek": t["gameweek"],
+                    "out": [f"{p['name']} ({p['club']}, {p['price']})" for p in t["out"]],
+                    "in": [f"{p['name']} ({p['club']}, {p['price']})" for p in t["in"]],
+                    "expected_gain": t.get("expected_gain"),
+                    "penalty": t.get("penalty", 0),
+                    "weeks_played": t["weeks_played"],
+                    "in_points": t["in_points"],
+                    "out_points": t["out_points"],
+                    "net_points": t["net_points"],
+                }
+                for t in outcomes[-20:]
+            ],
+            "summary": {
+                "transfers": len(outcomes),
+                "settled": len(settled),
+                "net_points_total": sum(t["net_points"] for t in settled),
+            },
+        }
+
+    def tool_remember(self, a: RememberInput) -> dict:
+        try:
+            note = self._require_memory().add_note(a.note)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return {"saved": note}
+
+    def tool_forget(self, a: ForgetInput) -> dict:
+        if not self._require_memory().delete_note(a.note_id):
+            raise ToolError(f"Ingen anteckning med id {a.note_id}.")
+        return {"deleted": a.note_id}
+
     def _named_transfer(self, result: dict, out_ids: list[str], in_ids: list[str]) -> dict:
         gws = result.get("gameweeks", [])
         summary = {k: v for k, v in result.items() if k not in ("new_player_ids", "out", "in")}
@@ -371,7 +455,7 @@ class Advisor:
         self,
         model_id: str,
         effort: str,
-        context: Callable[[str], tuple[Model, TeamState]],
+        context: Callable[[str], tuple[Model, TeamState, ProfileMemory | None]],
         web_search: bool = True,
     ):
         self.client = anthropic.AsyncAnthropic()
@@ -400,7 +484,7 @@ class Advisor:
         cid, messages = self._conversation(profile, conversation_id)
         yield {"type": "conversation", "id": cid}
 
-        model, _ = self.context(profile)
+        model, _, _ = self.context(profile)
         next_gw = model.next_gameweek
         gw = model.gameweek(next_gw) if next_gw else None
         when = f"nästa matchvecka är {next_gw} ({gw['start']} – {gw['end']})" if gw else "ingen kommande matchvecka"
@@ -455,8 +539,8 @@ class Advisor:
                 yield {"type": "error", "message": "Svaret blev för långt och avbröts."}
                 break
 
-            model, state = self.context(profile)
-            toolbox = Toolbox(model, state)
+            model, state, memory = self.context(profile)
+            toolbox = Toolbox(model, state, memory)
             results = []
             for block in tool_uses:
                 yield {"type": "tool", "name": block.name, "label": TOOL_LABELS.get(block.name, block.name)}

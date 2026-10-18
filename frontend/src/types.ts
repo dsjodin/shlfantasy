@@ -156,6 +156,44 @@ export interface ModelQuality {
     samples: number;
   }[];
   params?: Record<string, number>;
+  archived_price_weeks?: number[];
+  archived?: { weeks: number[]; name: string; mae: number; correlation: number; lineup_efficiency: number };
+  tuning_log?: {
+    date: string;
+    week: number;
+    adopted: boolean;
+    reason: string;
+    holdout_weeks?: number[];
+    current_mae?: number;
+    candidate_mae?: number;
+  }[];
+}
+
+export interface MemoryNote {
+  id: string;
+  text: string;
+  created: string;
+}
+
+export interface TransferLogPlayer {
+  id: string;
+  name: string;
+  club: string;
+  position: string;
+  price: number;
+}
+
+export interface TransferLog {
+  date: string;
+  gameweek: number;
+  out: TransferLogPlayer[];
+  in: TransferLogPlayer[];
+  penalty: number;
+  expected_gain: number;
+  weeks_played: number[];
+  in_points: number;
+  out_points: number;
+  net_points: number | null;
 }
 
 export type ChatEvent =

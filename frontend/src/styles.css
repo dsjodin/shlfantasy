@@ -952,3 +952,43 @@ tr.mine td:first-child {
   cursor: pointer;
   font-weight: 600;
 }
+
+.notes,
+.transfer-log,
+.tuning-log {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.notes li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem;
+}
+.transfer-log li {
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+.transfer-log .out-name {
+  color: var(--bad);
+}
+.transfer-log .in-name {
+  color: var(--good);
+}
+.tuning-log li {
+  font-size: 0.85rem;
+}
+.tuning-log li.good strong {
+  color: var(--good);
+}
+h3.sub {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.3rem;
+}

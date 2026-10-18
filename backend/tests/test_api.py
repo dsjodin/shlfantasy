@@ -72,3 +72,27 @@ def test_apply_transfer_updates_only_own_profile(client):
     team = r.json()
     assert new in team["player_ids"] and out not in team["player_ids"]
     assert team["free_transfers"] == 0
+
+
+def test_memory_endpoints_and_transfer_log(client):
+    c, main = client
+    p = c.post("/api/profiles", json={"name": "Anna"}).json()
+    h = {"X-Profile": p["id"]}
+    note = c.post("/api/memory/notes", json={"text": "Gillar backar från FHC"}, headers=h).json()
+    assert c.get("/api/memory", headers=h).json()["notes"] == [note]
+    assert c.delete(f"/api/memory/notes/{note['id']}", headers=h).status_code == 200
+    assert c.delete(f"/api/memory/notes/{note['id']}", headers=h).status_code == 404
+
+    model = main.current_model()
+    ids = cheapest_valid_squad(model)
+    c.put("/api/team", json={"player_ids": ids, "bank": 5, "free_transfers": 1}, headers=h)
+    out = ids[-1]
+    clubs = [model.players[i].club for i in ids if i != out]
+    new = next(
+        x.id for x in model.players.values()
+        if x.position == model.players[out].position and x.id not in ids and clubs.count(x.club) < 3
+        and x.price <= model.players[out].price + 5
+    )
+    c.post("/api/transfers/apply", json={"out": [out], "in": [new], "horizon": 2}, headers=h)
+    [logged] = c.get("/api/memory", headers=h).json()["transfers"]
+    assert logged["in"][0]["id"] == new and logged["net_points"] is None

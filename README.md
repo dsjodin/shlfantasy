@@ -35,6 +35,16 @@ Efter matchvecka 2–5 säsongen 2026/27 såg det ut så här: modellen missar i
 
 Backtesten har en svaghet som bör sägas rakt ut. Fantasy SHL publicerar inte historiska priser, så testet använder dagens pris, som redan har påverkats av de veckor som testas. Det gör att priset ser något klokare ut i efterhand än det var, och därför väger modellen priset lite lägre än vad backtesten själv föreslår.
 
+## Lär sig systemet?
+
+Ja, på tre sätt.
+
+Prognosarkivet sparar inför varje matchvecka modellens prognos och priserna vid deadline (`data/history/gw<N>.json`). Filen skrivs om varje timme tills veckan startar och fryses sedan. Det ger en exakt mätning i efterhand av vad modellen faktiskt trodde, och löser prisproblemet ovan för alla veckor från och med nu.
+
+Vikterna justeras automatiskt efter varje slutrapporterad matchvecka (`data/params.json`). Nya vikter tas fram på alla veckor utom de två senaste och prövas sedan på just de två, som de aldrig sett. De tas bara i bruk om medelfelet blir minst 1 % lägre och den bästa elvan inte blir sämre. Med få veckor är risken stor att anpassa sig efter slumpen, därför spärrarna. Varje prövning loggas och syns i appen. Första prövningen efter vecka 5 gav en kandidat som bara var 0,0 % bättre, så vikterna behölls.
+
+AI-rådgivaren har ett minne per profil. Varje byte som genomförs i appen loggas med förväntad vinst, och när veckorna spelats räknas det faktiska utfallet fram (poäng för köpta minus sålda spelare, minus avdrag). AI:n sparar också preferenser och planer som du nämner i chatten. Den läser minnet innan den ger råd och kan peka på mönster, till exempel att du ofta köper spelare på formtopp som sedan dalar. Minnet syns och kan redigeras under Mitt lag.
+
 Modellen vet fortfarande ingenting om kedjor, powerplay-roller eller nyheter. Där kommer AI-rådgivaren in: den kan söka på webben efter skador, laguppställningar och målvaktsbesked innan den rekommenderar något, och visar källorna.
 
 En sak att känna till: appen räknar med att du säljer en spelare till dagens pris. Om Fantasy SHL använder ett annat försäljningspris för din spelare, justera banken under "Mitt lag".
@@ -92,6 +102,9 @@ backend/app/
   model.py      xP-modellen
   projection.py poängformeln (pris, speltid, form, motstånd, hemmaplan)
   backtest.py   mäter modellen mot spelade matchveckor
+  archive.py    sparar prognos och priser vid varje deadline
+  tuning.py     automatisk justering av vikterna med spärrar
+  memory.py     AI:ns minne per profil (anteckningar, byteshistorik)
   squad.py      regler, laguttagning, bytesanalys, coachkort
   optimizer.py  heltalsoptimering av byten
   advisor.py    AI-rådgivaren (Claude + verktyg)

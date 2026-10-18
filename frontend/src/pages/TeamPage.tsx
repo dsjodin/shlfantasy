@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type TeamInput } from "../api";
 import { PlayerPicker } from "../components/PlayerPicker";
+import { MemoryPanel } from "../components/MemoryPanel";
 import { ProfileSettings } from "../components/Profiles";
 import { PlayerRow } from "../components/PlayerBits";
 import { mkr, num } from "../format";
@@ -230,6 +231,8 @@ export function TeamPage() {
           </section>
         </div>
       </div>
+
+      <MemoryPanel />
 
       <ProfileSettings />
 
