@@ -53,7 +53,7 @@ def _advisor(model, state, responses):
     advisor = Advisor.__new__(Advisor)
     advisor.model_id = "claude-opus-5-5"
     advisor.effort = "medium"
-    advisor.context = lambda: (model, state)
+    advisor.context = lambda profile: (model, state)
     advisor.conversations = __import__("collections").OrderedDict()
     fake = FakeMessages(responses)
     advisor.client = SimpleNamespace(beta=SimpleNamespace(messages=fake))
@@ -73,7 +73,7 @@ async def test_tool_round_trip(model, state):
             _msg("end_turn", _text("Ditt lag ser bra ut.")),
         ],
     )
-    events = await _collect(advisor.chat(None, "Hur ser mitt lag ut?"))
+    events = await _collect(advisor.chat("p1", None, "Hur ser mitt lag ut?"))
     types = [e["type"] for e in events]
     assert types[0] == "conversation"
     assert "tool" in types and types[-1] == "done"
@@ -88,7 +88,7 @@ async def test_tool_round_trip(model, state):
 
     # Historiken är append-only och avslutas med assistentens svar
     cid = events[0]["id"]
-    history = advisor.conversations[cid]
+    history = advisor.conversations[cid][1]
     assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
 
 
@@ -101,16 +101,16 @@ async def test_tool_error_is_reported_to_model(model, state):
             _msg("end_turn", _text("Hittade inte spelaren.")),
         ],
     )
-    await _collect(advisor.chat(None, "Hur bra är Finns Inte?"))
+    await _collect(advisor.chat("p1", None, "Hur bra är Finns Inte?"))
     result = fake.calls[1]["messages"][-1]["content"][0]
     assert result["is_error"] is True
 
 
 async def test_truncated_tool_call_is_closed(model, state):
     advisor, fake = _advisor(model, state, [_msg("max_tokens", _tool("t1", "get_my_team", {}))])
-    events = await _collect(advisor.chat(None, "Hej"))
+    events = await _collect(advisor.chat("p1", None, "Hej"))
     assert any(e["type"] == "error" for e in events)
-    history = next(iter(advisor.conversations.values()))
+    _, history = next(iter(advisor.conversations.values()))
     # Sista meddelandet besvarar tool_use så att nästa fråga inte avvisas
     assert history[-1]["role"] == "user"
     assert history[-1]["content"][0]["tool_use_id"] == "t1"
@@ -118,8 +118,16 @@ async def test_truncated_tool_call_is_closed(model, state):
 
 async def test_conversation_continues(model, state):
     advisor, fake = _advisor(model, state, [_msg("end_turn", _text("Svar 1")), _msg("end_turn", _text("Svar 2"))])
-    first = await _collect(advisor.chat(None, "Fråga 1"))
+    first = await _collect(advisor.chat("p1", None, "Fråga 1"))
     cid = first[0]["id"]
-    second = await _collect(advisor.chat(cid, "Fråga 2"))
+    second = await _collect(advisor.chat("p1", cid, "Fråga 2"))
     assert second[0]["id"] == cid
     assert len(fake.calls[1]["messages"]) == 3
+
+
+async def test_profiles_cannot_share_conversations(model, state):
+    advisor, fake = _advisor(model, state, [_msg("end_turn", _text("A")), _msg("end_turn", _text("B"))])
+    first = await _collect(advisor.chat("p1", None, "Fråga"))
+    other = await _collect(advisor.chat("p2", first[0]["id"], "Fråga"))
+    assert other[0]["id"] != first[0]["id"]
+    assert len(fake.calls[1]["messages"]) == 1

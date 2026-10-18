@@ -350,28 +350,31 @@ class Toolbox:
 
 
 class Advisor:
-    def __init__(self, model_id: str, effort: str, context: Callable[[], tuple[Model, TeamState]]):
+    def __init__(self, model_id: str, effort: str, context: Callable[[str], tuple[Model, TeamState]]):
         self.client = anthropic.AsyncAnthropic()
         self.model_id = model_id
         self.effort = effort
         self.context = context
-        self.conversations: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+        # {conversation_id: (profil, meddelanden)} – en profil kan inte fortsätta någon annans konversation
+        self.conversations: OrderedDict[str, tuple[str, list[dict[str, Any]]]] = OrderedDict()
 
-    def _conversation(self, conversation_id: str | None) -> tuple[str, list[dict[str, Any]]]:
+    def _conversation(self, profile: str, conversation_id: str | None) -> tuple[str, list[dict[str, Any]]]:
         if conversation_id and conversation_id in self.conversations:
-            self.conversations.move_to_end(conversation_id)
-            return conversation_id, self.conversations[conversation_id]
+            owner, messages = self.conversations[conversation_id]
+            if owner == profile:
+                self.conversations.move_to_end(conversation_id)
+                return conversation_id, messages
         cid = uuid.uuid4().hex
-        self.conversations[cid] = []
+        self.conversations[cid] = (profile, [])
         while len(self.conversations) > MAX_CONVERSATIONS:
             self.conversations.popitem(last=False)
-        return cid, self.conversations[cid]
+        return cid, self.conversations[cid][1]
 
-    async def chat(self, conversation_id: str | None, text: str) -> AsyncIterator[dict[str, Any]]:
-        cid, messages = self._conversation(conversation_id)
+    async def chat(self, profile: str, conversation_id: str | None, text: str) -> AsyncIterator[dict[str, Any]]:
+        cid, messages = self._conversation(profile, conversation_id)
         yield {"type": "conversation", "id": cid}
 
-        model, _ = self.context()
+        model, _ = self.context(profile)
         next_gw = model.next_gameweek
         gw = model.gameweek(next_gw) if next_gw else None
         when = f"nästa matchvecka är {next_gw} ({gw['start']} – {gw['end']})" if gw else "ingen kommande matchvecka"
@@ -418,7 +421,7 @@ class Advisor:
                 yield {"type": "error", "message": "Svaret blev för långt och avbröts."}
                 break
 
-            model, state = self.context()
+            model, state = self.context(profile)
             toolbox = Toolbox(model, state)
             results = []
             for block in tool_uses:

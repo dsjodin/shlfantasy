@@ -10,8 +10,15 @@ Appen hämtar allt automatiskt vid start och sedan en gång i timmen. Födelseda
 
 Det enda som inte finns öppet är ditt eget lag. Det lägger du in en gång under "Mitt lag" (15 spelare och vad du har kvar i banken). När du sedan gör ett byte här och trycker på "Genomför i mitt lag" uppdateras laget, banken och antalet gratisbyten automatiskt.
 
+## Flera i familjen
+
+Appen har profiler, ungefär som på Netflix. Varje familjemedlem väljer eller skapar sin profil första gången och får ett eget lag, egen bank, egna coachkort och en egen AI-chatt. Enheten kommer ihåg vilken profil som valdes, och man byter genom att klicka på namnet uppe till höger.
+
+Profilerna har inget lösenord. Det räcker på hemnätet men betyder att vem som helst kan välja någon annans profil. Lagen sparas på servern i `data/teams/<id>.json`, en fil per profil, så det är samma lag oavsett om man öppnar appen i datorn eller telefonen. Fanns det ett lag sedan tidigare (`data/team.json`) flyttas det automatiskt till profilen "Mitt lag".
+
 ## Funktioner
 
+- Profiler: ett eget lag per familjemedlem.
 - Mitt lag: trupp, bank, gratisbyten och använda coachkort, med regelkontroll och föreslagen laguttagning (två femmor, målvakt, kapten och assisterande kapten).
 - Byten: välj vem som ska ut och se direkt vad du har att lägga, vilka som är möjliga och modellens bästa ersättare. Kalkylatorn visar bank efter byte, poängavdrag och förväntad poängförändring vecka för vecka. Optimeraren räknar fram bästa kombinationen av 1 till 4 byten, eller ett helt nytt lag med Fria Byten.
 - Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, samt matchschema per lag och vecka.
@@ -78,6 +85,7 @@ backend/app/
   squad.py      regler, laguttagning, bytesanalys, coachkort
   optimizer.py  heltalsoptimering av byten
   advisor.py    AI-rådgivaren (Claude + verktyg)
+  team_store.py profiler och sparade lag
   main.py       REST-API och servering av frontend
 frontend/src/   webbgränssnittet
 ```

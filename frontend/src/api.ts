@@ -11,10 +11,24 @@ import type {
   Team,
 } from "./types";
 
+let currentProfile: string | null = null;
+
+/** Vald profil skickas med i varje anrop så att servern vet vems lag det gäller. */
+export function setApiProfile(id: string | null) {
+  currentProfile = id;
+}
+
+function headers(json: boolean): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (currentProfile) h["X-Profile"] = currentProfile;
+  return h;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: headers(!!body),
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -44,7 +58,16 @@ export interface TransferInput {
   free_card?: boolean;
 }
 
+export interface Profile {
+  id: string;
+  name: string;
+}
+
 export const api = {
+  profiles: () => request<{ profiles: Profile[] }>("GET", "/api/profiles"),
+  createProfile: (name: string) => request<Profile>("POST", "/api/profiles", { name }),
+  renameProfile: (id: string, name: string) => request<Profile>("PATCH", `/api/profiles/${id}`, { name }),
+  deleteProfile: (id: string) => request<{ profiles: Profile[] }>("DELETE", `/api/profiles/${id}`),
   status: () => request<Status>("GET", "/api/status"),
   refresh: () => request<Status>("POST", "/api/refresh"),
   players: (horizon: number) =>
@@ -80,7 +103,7 @@ export async function streamChat(
 ): Promise<void> {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(true),
     body: JSON.stringify(body),
     signal,
   });

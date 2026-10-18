@@ -9,7 +9,7 @@ import logging
 from typing import Any, AsyncIterator
 
 import anthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -31,7 +31,7 @@ from .squad import (
     transfer_penalty,
     validate_squad,
 )
-from .team_store import TeamStore
+from .team_store import ProfileNotFound, TeamStore
 from .views import gameweek_view, player_view
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -55,7 +55,7 @@ def current_model() -> Model:
 
 
 advisor = (
-    Advisor(settings.claude_model, settings.claude_effort, lambda: (current_model(), teams.load()))
+    Advisor(settings.claude_model, settings.claude_effort, lambda profile: (current_model(), teams.load(profile)))
     if settings.ai_enabled
     else None
 )
@@ -153,6 +153,55 @@ def fixtures(weeks: int = 6) -> dict:
     }
 
 
+# ---------------------------------------------------------------- profiler
+
+
+def profile_id(x_profile: str | None = Header(default=None)) -> str:
+    """Varje familjemedlem har en egen profil. Frontend skickar vald profil i X-Profile."""
+    if not x_profile or not teams.exists(x_profile):
+        raise HTTPException(400, "Välj eller skapa en profil först.")
+    return x_profile
+
+
+class ProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=30)
+
+
+@app.get("/api/profiles")
+def list_profiles() -> dict:
+    return {"profiles": teams.profiles()}
+
+
+@app.post("/api/profiles")
+def create_profile(body: ProfileIn) -> dict:
+    try:
+        return teams.create(body.name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/profiles/{pid}")
+def rename_profile(pid: str, body: ProfileIn) -> dict:
+    try:
+        return teams.rename(pid, body.name)
+    except ProfileNotFound as exc:
+        raise HTTPException(404, "Okänd profil") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/profiles/{pid}")
+def delete_profile(pid: str) -> dict:
+    try:
+        teams.delete(pid)
+    except ProfileNotFound as exc:
+        raise HTTPException(404, "Okänd profil") from exc
+    return {"profiles": teams.profiles()}
+
+
+Profile = Depends(profile_id)
+
+
 # ---------------------------------------------------------------- mitt lag
 
 
@@ -177,15 +226,15 @@ def _team_response(model: Model, state: TeamState) -> dict:
 
 
 @app.get("/api/team")
-def get_team() -> dict:
-    return _team_response(current_model(), teams.load())
+def get_team(profile: str = Profile) -> dict:
+    return _team_response(current_model(), teams.load(profile))
 
 
 @app.put("/api/team")
-def put_team(team: TeamIn) -> dict:
+def put_team(team: TeamIn, profile: str = Profile) -> dict:
     state = TeamState(**team.model_dump())
     state.used_cards = [c for c in state.used_cards if c in COACH_CARDS]
-    teams.save(state)
+    teams.save(profile, state)
     return _team_response(current_model(), state)
 
 
@@ -195,18 +244,18 @@ def validate_team(team: TeamIn) -> dict:
 
 
 @app.get("/api/lineup")
-def lineup(gameweek: int | None = None) -> dict:
+def lineup(gameweek: int | None = None, profile: str = Profile) -> dict:
     model = current_model()
     gw = gameweek or model.next_gameweek
     if gw is None:
         raise HTTPException(404, "Ingen kommande matchvecka")
-    return best_lineup(model, teams.load().player_ids, gw).to_dict()
+    return best_lineup(model, teams.load(profile).player_ids, gw).to_dict()
 
 
 @app.get("/api/cards")
-def cards(weeks: int = 6) -> dict:
+def cards(weeks: int = 6, profile: str = Profile) -> dict:
     model = current_model()
-    return {"weeks": card_analysis(model, teams.load(), weeks)}
+    return {"weeks": card_analysis(model, teams.load(profile), weeks)}
 
 
 # ---------------------------------------------------------------- byten
@@ -233,15 +282,15 @@ class BuildIn(BaseModel):
 
 
 @app.post("/api/transfers/evaluate")
-def transfers_evaluate(body: TransferIn) -> dict:
-    return evaluate_transfers(current_model(), teams.load(), body.out, body.into, body.horizon, body.free_card)
+def transfers_evaluate(body: TransferIn, profile: str = Profile) -> dict:
+    return evaluate_transfers(current_model(), teams.load(profile), body.out, body.into, body.horizon, body.free_card)
 
 
 @app.post("/api/transfers/apply")
-def transfers_apply(body: TransferIn) -> dict:
+def transfers_apply(body: TransferIn, profile: str = Profile) -> dict:
     """Genomför bytet i ditt sparade lag (efter att du gjort det på fantasy.shl.se)."""
     model = current_model()
-    state = teams.load()
+    state = teams.load(profile)
     result = evaluate_transfers(model, state, body.out, body.into, body.horizon, body.free_card)
     if not result["valid"]:
         raise HTTPException(400, "; ".join(i["message"] for i in result["issues"] if i["level"] == "error"))
@@ -251,13 +300,13 @@ def transfers_apply(body: TransferIn) -> dict:
     state.free_transfers = state.free_transfers - used_free
     if body.free_card and "fria_byten" not in state.used_cards:
         state.used_cards.append("fria_byten")
-    teams.save(state)
+    teams.save(profile, state)
     return _team_response(model, state)
 
 
 @app.post("/api/transfers/suggest")
-async def transfers_suggest(body: SuggestIn) -> dict:
-    model, state = current_model(), teams.load()
+async def transfers_suggest(body: SuggestIn, profile: str = Profile) -> dict:
+    model, state = current_model(), teams.load(profile)
     if not state.player_ids:
         raise HTTPException(400, "Lägg in ditt lag först.")
     options = await asyncio.to_thread(
@@ -278,8 +327,10 @@ async def transfers_build(body: BuildIn) -> dict:
 
 
 @app.get("/api/transfers/alternatives/{player_id}")
-def transfers_alternatives(player_id: str, horizon: int = 3, limit: int = 10, max_price: float | None = None) -> dict:
-    model, state = current_model(), teams.load()
+def transfers_alternatives(
+    player_id: str, horizon: int = 3, limit: int = 10, max_price: float | None = None, profile: str = Profile
+) -> dict:
+    model, state = current_model(), teams.load(profile)
     if player_id not in state.player_ids:
         raise HTTPException(400, "Spelaren finns inte i ditt lag.")
     return {"options": alternatives(model, state, player_id, horizon, limit, max_price)}
@@ -334,22 +385,22 @@ def _sse_error(message: str) -> str:
 
 
 @app.post("/api/ai/chat")
-async def ai_chat(body: ChatIn) -> StreamingResponse:
+async def ai_chat(body: ChatIn, profile: str = Profile) -> StreamingResponse:
     ai = _require_ai()
     current_model()
-    return StreamingResponse(_sse(ai.chat(body.conversation_id, body.message)), media_type="text/event-stream")
+    return StreamingResponse(_sse(ai.chat(profile, body.conversation_id, body.message)), media_type="text/event-stream")
 
 
 @app.post("/api/ai/review")
-async def ai_review(body: ReviewIn) -> StreamingResponse:
+async def ai_review(body: ReviewIn, profile: str = Profile) -> StreamingResponse:
     ai = _require_ai()
-    model, state = current_model(), teams.load()
+    model, state = current_model(), teams.load(profile)
     if not body.out or len(body.out) != len(body.into) or any(pid not in model.players for pid in body.out + body.into):
         raise HTTPException(400, "Ogiltigt byte.")
     if any(pid not in state.player_ids for pid in body.out):
         raise HTTPException(400, "Spelaren som ska säljas finns inte i ditt lag.")
     prompt = review_prompt(model, state, body.out, body.into, body.horizon)
-    return StreamingResponse(_sse(ai.chat(body.conversation_id, prompt)), media_type="text/event-stream")
+    return StreamingResponse(_sse(ai.chat(profile, body.conversation_id, prompt)), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------- frontend
