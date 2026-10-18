@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.advisor import Advisor
+from app.advisor import SYSTEM_PROMPT, TOOLS, WEB_SEARCH_TOOL, Advisor
 
 
 class FakeStream:
@@ -20,6 +20,8 @@ class FakeStream:
             for block in self.message.content:
                 if block.type == "text":
                     yield SimpleNamespace(type="text", text=block.text)
+                elif block.type == "server_tool_use":
+                    yield SimpleNamespace(type="content_block_start", content_block=block)
 
         return gen()
 
@@ -41,8 +43,8 @@ def _msg(stop_reason, *blocks):
     return SimpleNamespace(stop_reason=stop_reason, content=list(blocks))
 
 
-def _text(t):
-    return SimpleNamespace(type="text", text=t)
+def _text(t, citations=None):
+    return SimpleNamespace(type="text", text=t, citations=citations)
 
 
 def _tool(id_, name, input_):
@@ -53,8 +55,10 @@ def _advisor(model, state, responses):
     advisor = Advisor.__new__(Advisor)
     advisor.model_id = "claude-opus-5-5"
     advisor.effort = "medium"
-    advisor.context = lambda: (model, state)
+    advisor.context = lambda profile: (model, state)
     advisor.conversations = __import__("collections").OrderedDict()
+    advisor.system = SYSTEM_PROMPT
+    advisor.tools = TOOLS + [WEB_SEARCH_TOOL]
     fake = FakeMessages(responses)
     advisor.client = SimpleNamespace(beta=SimpleNamespace(messages=fake))
     return advisor, fake
@@ -73,7 +77,7 @@ async def test_tool_round_trip(model, state):
             _msg("end_turn", _text("Ditt lag ser bra ut.")),
         ],
     )
-    events = await _collect(advisor.chat(None, "Hur ser mitt lag ut?"))
+    events = await _collect(advisor.chat("p1", None, "Hur ser mitt lag ut?"))
     types = [e["type"] for e in events]
     assert types[0] == "conversation"
     assert "tool" in types and types[-1] == "done"
@@ -88,7 +92,7 @@ async def test_tool_round_trip(model, state):
 
     # Historiken är append-only och avslutas med assistentens svar
     cid = events[0]["id"]
-    history = advisor.conversations[cid]
+    history = advisor.conversations[cid][1]
     assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
 
 
@@ -101,16 +105,16 @@ async def test_tool_error_is_reported_to_model(model, state):
             _msg("end_turn", _text("Hittade inte spelaren.")),
         ],
     )
-    await _collect(advisor.chat(None, "Hur bra är Finns Inte?"))
+    await _collect(advisor.chat("p1", None, "Hur bra är Finns Inte?"))
     result = fake.calls[1]["messages"][-1]["content"][0]
     assert result["is_error"] is True
 
 
 async def test_truncated_tool_call_is_closed(model, state):
     advisor, fake = _advisor(model, state, [_msg("max_tokens", _tool("t1", "get_my_team", {}))])
-    events = await _collect(advisor.chat(None, "Hej"))
+    events = await _collect(advisor.chat("p1", None, "Hej"))
     assert any(e["type"] == "error" for e in events)
-    history = next(iter(advisor.conversations.values()))
+    _, history = next(iter(advisor.conversations.values()))
     # Sista meddelandet besvarar tool_use så att nästa fråga inte avvisas
     assert history[-1]["role"] == "user"
     assert history[-1]["content"][0]["tool_use_id"] == "t1"
@@ -118,8 +122,37 @@ async def test_truncated_tool_call_is_closed(model, state):
 
 async def test_conversation_continues(model, state):
     advisor, fake = _advisor(model, state, [_msg("end_turn", _text("Svar 1")), _msg("end_turn", _text("Svar 2"))])
-    first = await _collect(advisor.chat(None, "Fråga 1"))
+    first = await _collect(advisor.chat("p1", None, "Fråga 1"))
     cid = first[0]["id"]
-    second = await _collect(advisor.chat(cid, "Fråga 2"))
+    second = await _collect(advisor.chat("p1", cid, "Fråga 2"))
     assert second[0]["id"] == cid
     assert len(fake.calls[1]["messages"]) == 3
+
+
+async def test_profiles_cannot_share_conversations(model, state):
+    advisor, fake = _advisor(model, state, [_msg("end_turn", _text("A")), _msg("end_turn", _text("B"))])
+    first = await _collect(advisor.chat("p1", None, "Fråga"))
+    other = await _collect(advisor.chat("p2", first[0]["id"], "Fråga"))
+    assert other[0]["id"] != first[0]["id"]
+    assert len(fake.calls[1]["messages"]) == 1
+
+
+async def test_web_search_pause_and_sources(model, state):
+    search = SimpleNamespace(type="server_tool_use", id="s1", name="web_search", input={"query": "Zohorna skadad"})
+    cite = SimpleNamespace(type="web_search_result_location", url="https://www.shl.se/nyhet", title="Nyhet")
+    advisor, fake = _advisor(
+        model,
+        state,
+        [
+            _msg("pause_turn", search),
+            _msg("end_turn", _text("Han är frisk.", citations=[cite, cite])),
+        ],
+    )
+    events = await _collect(advisor.chat("p1", None, "Är Zohorna skadad?"))
+    assert {"type": "tool", "name": "web_search", "label": "Söker på webben"} in events
+    sources = [e for e in events if e["type"] == "sources"]
+    assert sources == [{"type": "sources", "sources": [{"url": "https://www.shl.se/nyhet", "title": "Nyhet"}]}]
+    # pause_turn: andra anropet skickar den pausade assistenttur som sista meddelande, inget extra användarmeddelande
+    second = fake.calls[1]["messages"]
+    assert second[-1]["role"] == "assistant"
+    assert fake.calls[0]["tools"][-1]["type"] == "web_search_20260209"

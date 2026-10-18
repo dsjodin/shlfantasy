@@ -6,6 +6,7 @@ export interface AiTurn {
   role: "user" | "assistant";
   text: string;
   tools: string[];
+  sources?: { url: string; title: string }[];
   error?: string;
   pending?: boolean;
 }
@@ -33,6 +34,11 @@ export function useAiConversation() {
       if (e.type === "conversation") conversationId.current = e.id;
       else if (e.type === "text") update((turn) => ({ ...turn, text: turn.text + e.text }));
       else if (e.type === "tool") update((turn) => ({ ...turn, tools: [...turn.tools, e.label] }));
+      else if (e.type === "sources")
+        update((turn) => {
+          const known = new Set((turn.sources ?? []).map((s) => s.url));
+          return { ...turn, sources: [...(turn.sources ?? []), ...e.sources.filter((s) => !known.has(s.url))] };
+        });
       else if (e.type === "error") update((turn) => ({ ...turn, error: e.message }));
       else if (e.type === "done") update((turn) => ({ ...turn, pending: false }));
     };

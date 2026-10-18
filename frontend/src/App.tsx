@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { dateTime } from "./format";
+import { ProfileMenu, ProfilePicker } from "./components/Profiles";
 import { AdvisorPage } from "./pages/AdvisorPage";
 import { PlannerPage } from "./pages/PlannerPage";
 import { PlayersPage } from "./pages/PlayersPage";
@@ -24,7 +25,7 @@ function readTab(): TabKey {
 }
 
 export function App() {
-  const { status, horizon, setHorizon, gameweeks, loading, error, reload } = useApp();
+  const { status, horizon, setHorizon, gameweeks, loading, error, reload, profile, profiles } = useApp();
   const [tab, setTab] = useState<TabKey>(readTab);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -60,6 +61,7 @@ export function App() {
           </div>
         </div>
         <div className="header-controls">
+          <ProfileMenu />
           <label title="Hur många veckor framåt xP och optimering räknar på">
             Period{" "}
             <select value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}>
@@ -90,10 +92,12 @@ export function App() {
         ))}
         {error ? (
           <div className="alert error">{error}</div>
-        ) : loading && !status ? (
+        ) : profiles === null || (loading && !status) ? (
           <p className="empty">Laddar…</p>
+        ) : !profile ? (
+          <ProfilePicker />
         ) : (
-          <Page />
+          <Page key={profile.id} />
         )}
       </main>
       <footer>
