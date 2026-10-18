@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.advisor import Advisor
+from app.advisor import SYSTEM_PROMPT, TOOLS, WEB_SEARCH_TOOL, Advisor
 
 
 class FakeStream:
@@ -20,6 +20,8 @@ class FakeStream:
             for block in self.message.content:
                 if block.type == "text":
                     yield SimpleNamespace(type="text", text=block.text)
+                elif block.type == "server_tool_use":
+                    yield SimpleNamespace(type="content_block_start", content_block=block)
 
         return gen()
 
@@ -41,8 +43,8 @@ def _msg(stop_reason, *blocks):
     return SimpleNamespace(stop_reason=stop_reason, content=list(blocks))
 
 
-def _text(t):
-    return SimpleNamespace(type="text", text=t)
+def _text(t, citations=None):
+    return SimpleNamespace(type="text", text=t, citations=citations)
 
 
 def _tool(id_, name, input_):
@@ -55,6 +57,8 @@ def _advisor(model, state, responses):
     advisor.effort = "medium"
     advisor.context = lambda profile: (model, state)
     advisor.conversations = __import__("collections").OrderedDict()
+    advisor.system = SYSTEM_PROMPT
+    advisor.tools = TOOLS + [WEB_SEARCH_TOOL]
     fake = FakeMessages(responses)
     advisor.client = SimpleNamespace(beta=SimpleNamespace(messages=fake))
     return advisor, fake
@@ -131,3 +135,24 @@ async def test_profiles_cannot_share_conversations(model, state):
     other = await _collect(advisor.chat("p2", first[0]["id"], "Fråga"))
     assert other[0]["id"] != first[0]["id"]
     assert len(fake.calls[1]["messages"]) == 1
+
+
+async def test_web_search_pause_and_sources(model, state):
+    search = SimpleNamespace(type="server_tool_use", id="s1", name="web_search", input={"query": "Zohorna skadad"})
+    cite = SimpleNamespace(type="web_search_result_location", url="https://www.shl.se/nyhet", title="Nyhet")
+    advisor, fake = _advisor(
+        model,
+        state,
+        [
+            _msg("pause_turn", search),
+            _msg("end_turn", _text("Han är frisk.", citations=[cite, cite])),
+        ],
+    )
+    events = await _collect(advisor.chat("p1", None, "Är Zohorna skadad?"))
+    assert {"type": "tool", "name": "web_search", "label": "Söker på webben"} in events
+    sources = [e for e in events if e["type"] == "sources"]
+    assert sources == [{"type": "sources", "sources": [{"url": "https://www.shl.se/nyhet", "title": "Nyhet"}]}]
+    # pause_turn: andra anropet skickar den pausade assistenttur som sista meddelande, inget extra användarmeddelande
+    second = fake.calls[1]["messages"]
+    assert second[-1]["role"] == "assistant"
+    assert fake.calls[0]["tools"][-1]["type"] == "web_search_20260209"

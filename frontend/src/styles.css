@@ -936,3 +936,19 @@ tr.mine td:first-child {
   align-items: center;
   gap: 0.4rem;
 }
+
+.sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.8rem;
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.sources a {
+  color: var(--accent);
+}
+.quality summary {
+  cursor: pointer;
+  font-weight: 600;
+}

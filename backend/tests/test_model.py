@@ -1,4 +1,7 @@
 from app.model import build_model
+from app.projection import Params
+
+NEUTRAL = Params(opponent_weight=0.0, home_advantage=0.0)
 
 
 def test_next_gameweek_and_horizon(model):
@@ -12,7 +15,8 @@ def test_games_per_gameweek(model):
     assert model.games_in("FFF", 3) == 1
 
 
-def test_xp_scales_with_games(model):
+def test_xp_scales_with_games(snapshot):
+    model = build_model(snapshot, NEUTRAL)
     aaa = next(p for p in model.players.values() if p.club == "AAA" and p.position == "F")
     fff = next(p for p in model.players.values() if p.club == "FFF" and p.position == "F")
     assert aaa.xp[2] == round(aaa.xp_per_game * 3, 2)

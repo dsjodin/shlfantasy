@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { ModelQuality } from "../components/ModelQuality";
 import { PlayerDetail } from "../components/PlayerDetail";
 import { ClubBadge, PosBadge, StatusChip } from "../components/PlayerBits";
 import { num } from "../format";
@@ -124,6 +125,7 @@ export function PlayersPage() {
         </table>
       </div>
       <p className="hint">Markerade rader finns i ditt lag. Klicka på en spelare för detaljer.</p>
+      <ModelQuality />
       {selected && <PlayerDetail id={selected} onClose={() => setSelected(null)} />}
     </div>
   );

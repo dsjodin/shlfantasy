@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import optimizer
+from . import backtest, optimizer
 from .advisor import Advisor, review_prompt
 from .config import get_settings
 from .datastore import DataStore
@@ -55,7 +55,12 @@ def current_model() -> Model:
 
 
 advisor = (
-    Advisor(settings.claude_model, settings.claude_effort, lambda profile: (current_model(), teams.load(profile)))
+    Advisor(
+        settings.claude_model,
+        settings.claude_effort,
+        lambda profile: (current_model(), teams.load(profile)),
+        web_search=settings.web_search,
+    )
     if settings.ai_enabled
     else None
 )
@@ -139,6 +144,19 @@ def gameweeks() -> dict:
         "current_gameweek": model.current_gameweek,
         "gameweeks": gameweek_view(model),
     }
+
+
+_quality_cache: dict[str, Any] = {"version": -1, "report": None}
+
+
+@app.get("/api/model-quality")
+async def model_quality() -> dict:
+    """Backtest: hur väl modellen hade förutsagt de matchveckor som redan är spelade."""
+    current_model()
+    if _quality_cache["version"] != store.version:
+        _quality_cache["report"] = await asyncio.to_thread(backtest.report, store.snapshot)
+        _quality_cache["version"] = store.version
+    return _quality_cache["report"]
 
 
 @app.get("/api/fixtures")

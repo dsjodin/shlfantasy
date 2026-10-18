@@ -144,9 +144,24 @@ export interface Fixture {
   played: boolean;
 }
 
+export interface ModelQuality {
+  weeks: number[];
+  models: {
+    key: string;
+    name: string;
+    mae: number;
+    correlation: number;
+    lineup_efficiency: number;
+    mae_by_position: Record<string, number>;
+    samples: number;
+  }[];
+  params?: Record<string, number>;
+}
+
 export type ChatEvent =
   | { type: "conversation"; id: string }
   | { type: "text"; text: string }
   | { type: "tool"; name: string; label: string }
+  | { type: "sources"; sources: { url: string; title: string }[] }
   | { type: "error"; message: string }
   | { type: "done" };

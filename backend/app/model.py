@@ -7,8 +7,10 @@ Modellen är medvetet enkel och transparent:
    spelare efter förväntad poäng per match, så priset är en bra "prior".
 2. Speltid = andel av lagets matcher spelaren har spelat (viktigt för t.ex. målvakter).
 3. Formen (snitt senaste fem lagmatcher, inkl. nollor) vägs in för att fånga trender.
-4. xP för en vecka = förväntat per lagmatch × antal matcher laget spelar den veckan,
-   justerat för skada/frånvaro.
+4. xP för en vecka = summan över lagets matcher den veckan av förväntat per lagmatch,
+   justerat för motståndarens styrka, hemmaplan och skada/frånvaro.
+
+Själva formeln ligger i projection.py och vikterna är framtagna med backtest.py.
 """
 
 from __future__ import annotations
@@ -19,10 +21,8 @@ from datetime import date
 from typing import Any
 
 from .datastore import Snapshot
+from .projection import DEFAULT_PARAMS, Params, TeamStrength, expected_per_game, game_multiplier, price_priors, team_strength
 from .rules import POSITIONS
-
-PRIOR_STRENGTH = 4  # antal "låtsasmatcher" för priset som prior
-FORM_WEIGHT = 0.35
 
 # Multiplikator per vecka framåt (0 = nästa vecka) beroende på status
 STATUS_MULTIPLIERS = {
@@ -72,6 +72,8 @@ class Model:
     fixtures: dict[str, dict[int, list[dict[str, Any]]]]
     fetched_at: str | None
     errors: list[str]
+    strength: TeamStrength | None = None
+    params: Params = DEFAULT_PARAMS
 
     @property
     def next_gameweek(self) -> int | None:
@@ -109,24 +111,7 @@ def assign_gameweek(day: str, gameweeks: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def price_priors(players: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
-    """Viktad linjär regression ppg ~ pris per position. Returnerar (intercept, lutning)."""
-    priors = {}
-    for pos in POSITIONS:
-        rows = [(p["price"], p["ppg"], p["games_played"]) for p in players if p["position"] == pos and p["games_played"] >= 3]
-        w_sum = sum(w for _, _, w in rows)
-        if len(rows) < 5 or w_sum == 0:
-            priors[pos] = (sum(r[1] for r in rows) / len(rows) if rows else 2.0, 0.0)
-            continue
-        mx = sum(x * w for x, _, w in rows) / w_sum
-        my = sum(y * w for _, y, w in rows) / w_sum
-        var = sum(w * (x - mx) ** 2 for x, _, w in rows)
-        slope = sum(w * (x - mx) * (y - my) for x, y, w in rows) / var if var else 0.0
-        priors[pos] = (my - slope * mx, max(slope, 0.0))
-    return priors
-
-
-def build_model(snap: Snapshot) -> Model:
+def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
 
     fixtures: dict[str, dict[int, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
@@ -149,7 +134,8 @@ def build_model(snap: Snapshot) -> Model:
         for pid, row in snap.gameweek_points[key].items():
             history[pid].append({"gameweek": int(key), **row})
 
-    priors = price_priors(snap.players)
+    priors = price_priors(snap.players, POSITIONS)
+    strength = team_strength((g for g in games if g["played"]), params.team_prior_games)
     birthdates = snap.birthdates
     upcoming = [gw["number"] for gw in gameweeks if gw["status"] == "upcoming"]
 
@@ -173,26 +159,25 @@ def build_model(snap: Snapshot) -> Model:
             birth_date=birthdates.get(raw["id"]),
             history=history.get(raw["id"], []),
         )
-        intercept, slope = priors[p.position]
-        prior_ppg = max(intercept + slope * p.price, 0.5)
-        gp = p.games_played
-        quality = (gp * p.ppg + PRIOR_STRENGTH * prior_ppg) / (gp + PRIOR_STRENGTH)
-
-        team_gp = team_games_played.get(p.club, 0)
-        if team_gp == 0:
-            p.play_rate = 1.0
-        else:
-            # Lätt krympning så att en enstaka missad match inte slår för hårt
-            p.play_rate = min(1.0, (gp + 0.5) / (team_gp + 0.5))
-
-        base = quality * p.play_rate
-        p.xp_per_game = round(base if team_gp == 0 else (1 - FORM_WEIGHT) * base + FORM_WEIGHT * p.form, 2)
+        per_game, p.play_rate = expected_per_game(
+            price=p.price,
+            games_played=p.games_played,
+            ppg=p.ppg,
+            form=p.form,
+            team_games=team_games_played.get(p.club, 0),
+            prior=priors[p.position],
+            params=params,
+        )
+        p.xp_per_game = round(per_game, 2)
 
         multipliers = STATUS_MULTIPLIERS.get(p.status, STATUS_MULTIPLIERS["active"])
         for i, gw in enumerate(upcoming):
-            mult = multipliers[min(i, len(multipliers) - 1)]
-            n_games = len(fixtures.get(p.club, {}).get(gw, []))
-            p.xp[gw] = round(p.xp_per_game * n_games * mult, 2)
+            status_mult = multipliers[min(i, len(multipliers) - 1)]
+            week = sum(
+                game_multiplier(p.position, f["opponent"], f["home"], strength, params)
+                for f in fixtures.get(p.club, {}).get(gw, [])
+            )
+            p.xp[gw] = round(per_game * week * status_mult, 2)
         players[p.id] = p
 
     return Model(
@@ -203,4 +188,6 @@ def build_model(snap: Snapshot) -> Model:
         fixtures={club: dict(weeks) for club, weeks in fixtures.items()},
         fetched_at=snap.fetched_at,
         errors=snap.errors,
+        strength=strength,
+        params=params,
     )

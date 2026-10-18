@@ -60,6 +60,23 @@ Så arbetar du:
 Spelets regler:
 {RULES_TEXT}"""
 
+WEB_SEARCH_PROMPT = """
+Webbsökning:
+- Du kan söka på webben. Använd det för sådant verktygen inte vet: skador, sjukdom, avstängningar,
+  laguppställningar, kedjor och powerplay-roller, vilken målvakt som startar, trejder och nyheter.
+- Sök framför allt när du är på väg att rekommendera en spelare (köp, kapten) eller när en spelare i
+  laget har status injured/unavailable. Sök inte efter statistik som verktygen redan har.
+- Svenska källor brukar vara bäst (shl.se, lagens sajter, hockeysverige.se, expressen.se, aftonbladet.se,
+  svenska dagstidningar). Kontrollera datum – gamla nyheter kan vara inaktuella.
+- Säg tydligt vad som kommer från nyheter och vad som kommer från statistiken."""
+
+WEB_SEARCH_TOOL = {
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": 5,
+    "user_location": {"type": "approximate", "country": "SE", "timezone": "Europe/Stockholm"},
+}
+
 
 # ---------------------------------------------------------------- verktyg
 
@@ -350,11 +367,20 @@ class Toolbox:
 
 
 class Advisor:
-    def __init__(self, model_id: str, effort: str, context: Callable[[str], tuple[Model, TeamState]]):
+    def __init__(
+        self,
+        model_id: str,
+        effort: str,
+        context: Callable[[str], tuple[Model, TeamState]],
+        web_search: bool = True,
+    ):
         self.client = anthropic.AsyncAnthropic()
         self.model_id = model_id
         self.effort = effort
         self.context = context
+        # Systemprompt och verktyg bestäms en gång så att prompt-cachen träffar
+        self.system = SYSTEM_PROMPT + (WEB_SEARCH_PROMPT if web_search else "")
+        self.tools = TOOLS + ([WEB_SEARCH_TOOL] if web_search else [])
         # {conversation_id: (profil, meddelanden)} – en profil kan inte fortsätta någon annans konversation
         self.conversations: OrderedDict[str, tuple[str, list[dict[str, Any]]]] = OrderedDict()
 
@@ -387,8 +413,8 @@ class Advisor:
                     async with self.client.beta.messages.stream(
                         model=self.model_id,
                         max_tokens=64000,
-                        system=SYSTEM_PROMPT,
-                        tools=TOOLS,
+                        system=self.system,
+                        tools=self.tools,
                         messages=messages,
                         thinking={"type": "adaptive"},
                         output_config={"effort": self.effort},
@@ -399,6 +425,8 @@ class Advisor:
                         async for event in stream:
                             if event.type == "text":
                                 yield {"type": "text", "text": event.text}
+                            elif event.type == "content_block_start" and event.content_block.type == "server_tool_use":
+                                yield {"type": "tool", "name": "web_search", "label": "Söker på webben"}
                         final = await stream.get_final_message()
                     break
                 except ValueError:
@@ -409,7 +437,13 @@ class Advisor:
 
             messages.append({"role": "assistant", "content": final.content})
             tool_uses = [b for b in final.content if b.type == "tool_use"]
+            sources = _sources(final.content)
+            if sources:
+                yield {"type": "sources", "sources": sources}
 
+            if final.stop_reason == "pause_turn":
+                # Webbsökningen nådde serverns gräns per anrop – skicka tillbaka så fortsätter den
+                continue
             if final.stop_reason == "refusal":
                 self._close_open_tools(messages, tool_uses, "Svaret avbröts.")
                 yield {"type": "error", "message": "Modellen avböjde att svara på den frågan."}
@@ -457,6 +491,17 @@ class Advisor:
                     ],
                 }
             )
+
+
+def _sources(content: list[Any]) -> list[dict[str, str]]:
+    """Webbkällor som Claude citerat i svaret."""
+    seen: dict[str, str] = {}
+    for block in content:
+        for citation in getattr(block, "citations", None) or []:
+            url = getattr(citation, "url", None)
+            if url and url not in seen:
+                seen[url] = getattr(citation, "title", None) or url
+    return [{"url": url, "title": title} for url, title in seen.items()]
 
 
 def review_prompt(model: Model, state: TeamState, out_ids: list[str], in_ids: list[str], horizon: int) -> str:
