@@ -37,7 +37,7 @@ cp .env.example .env      # lägg in ANTHROPIC_API_KEY för AI-rådgivaren
 docker compose up -d --build
 ```
 
-Öppna sedan `http://<serverns-ip>:8000`. Första starten tar ungefär en halv minut innan all data är hämtad. Data och ditt lag sparas i `./data`.
+Öppna sedan `http://<serverns-ip>:8022`. Första starten tar ungefär en halv minut innan all data är hämtad. Data och ditt lag sparas i `./data`.
 
 Appen har ingen inloggning, så den bör bara exponeras på ditt hemnätverk eller bakom en reverse proxy med autentisering. Annars kan vem som helst använda din API-nyckel.
 
@@ -57,7 +57,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 python -m app.refresh            # hämta data manuellt
 pytest                            # tester
-uvicorn app.main:app --reload     # API på port 8000
+uvicorn app.main:app --reload --port 8022  # API på port 8022
 ```
 
 Frontend (React, Vite, TypeScript):
@@ -65,7 +65,7 @@ Frontend (React, Vite, TypeScript):
 ```bash
 cd frontend
 npm install
-npm run dev                       # http://localhost:5173, proxar /api till port 8000
+npm run dev                       # http://localhost:5173, proxar /api till port 8022
 ```
 
 Projektets uppbyggnad:
