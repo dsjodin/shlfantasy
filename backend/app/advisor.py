@@ -58,7 +58,10 @@ Så arbetar du:
   förväntan, andel spelade lagmatcher (senaste veckorna tyngst), form och antal matcher per vecka.
   För utespelare räknas varje poängkategori för sig: istid (stabil) litas på, mål och assist krymps
   hårt, och plus/minus, utvisningar och matchavgörande mål räknas som tur (PDO). Ändrad istid de
-  senaste två veckorna (från shl.se:s matchrapporter) justerar xP, eftersom den visar ändrad roll. Fältet trend visar om formen pekar
+  senaste två veckorna (från shl.se:s matchrapporter) justerar xP, eftersom den visar ändrad roll.
+  En enskild toppvecka dämpas, och spelare i lag som vann alla matcher förra veckan får avdrag
+  nästa vecka: backtesten visar att båda brukar följas av sämre utfall. Var skeptisk till köp som
+  bara bygger på ett lags heta period, och säg det till användaren. Fältet trend visar om formen pekar
   upp eller ner. Backtesten visar att en het poängperiod oftast inte håller i sig, medan ändrad
   speltid gör det. Lyft trenden som information, men överdriv den inte. Den vet inget om kedjor,
   powerplay-roller, målvaktsrotation eller nyheter. Lyft sådana osäkerheter när de spelar roll och

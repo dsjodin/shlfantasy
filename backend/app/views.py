@@ -33,6 +33,10 @@ def player_view(model: Model, p: Player, gameweeks: list[int], detailed: bool = 
         "trend": p.trend.to_dict(),
     }
     if detailed:
+        view["adjustments"] = {
+            "hot_week_penalty": p.hot_week_penalty,
+            "spike_per_game": round(model.params.spike_weight * p.spike, 2),
+        }
         view["breakdown"] = {k: v for k, v in p.breakdown.items() if v}
         view["history"] = p.history
         view["fixtures"] = {

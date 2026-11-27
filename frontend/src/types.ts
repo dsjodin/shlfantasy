@@ -39,6 +39,7 @@ export interface Player {
   xp: Record<string, number>;
   games: Record<string, number>;
   trend: Trend;
+  adjustments?: { hot_week_penalty: number; spike_per_game: number };
   breakdown?: Record<string, number>;
   history?: { gameweek: number; games: number; points: number }[];
   fixtures?: Record<string, string[]>;
