@@ -19,6 +19,11 @@ class Params:
     play_half_life: float = 1.5  # veckor, för speltidstrenden
     points_trend_weight: float = 0.0  # hur mycket poängtrenden (senaste veckorna mot säsongen) väger
     pdo_weight: float = 0.0  # andel av plus/minus-poängen som antas vara tur och dras bort (utespelare)
+    # Kategorimodellen (utespelare): varje poängkategori krymps mot positionens snitt för sig.
+    # Talet är antal "låtsasmatcher" med positionssnittet. Lågt = spelarens egen siffra litas på.
+    category_model: bool = False
+    stable_shrink: float = 0.5  # istid, tacklingar, blockerade skott, tekningar, skott
+    scoring_shrink: float = 10.0  # mål och assist
 
 
 # Valda med backtest mot matchvecka 2–5 säsongen 2026/27 (python -m app.backtest --tune).
@@ -26,8 +31,8 @@ class Params:
 # pris som redan påverkats av testveckorna. Därför en försiktigare mellanväg för priset.
 # Motstånd och hemmaplan förbättrade i 3 av 4 veckor även i varianter utan pris.
 # Motståndseffekten för målvakter gav ingenting och är avstängd.
-# Speltidstrend, poängtrend och PDO-korrigering testades mot matchvecka 2–9 (se trend.py och
-# README). Speltidstrend och PDO-korrigering förbättrade, poängtrenden försämrade.
+# Speltidstrend, poängtrend, PDO-korrigering och kategorimodell testades mot matchvecka 2–9 (se
+# trend.py och README). Alla utom poängtrenden förbättrade.
 DEFAULT_PARAMS = Params(
     prior_strength=6.0,
     form_weight=0.1,
@@ -37,8 +42,60 @@ DEFAULT_PARAMS = Params(
     recent_play_weight=1.0,
     play_half_life=1.0,
     points_trend_weight=0.0,
-    pdo_weight=1.0,
+    # Med kategorimodellen ersätts plus/minus av positionens snitt, så PDO-korrigeringen behövs
+    # inte. Utan kategorimodellen var pdo_weight=1,0 bäst.
+    pdo_weight=0.0,
+    category_model=True,
+    stable_shrink=0.5,
+    scoring_shrink=10.0,
 )
+
+# Poängkategorier för utespelare, grupperade efter hur väl de upprepar sig från vecka till vecka
+# (korrelation mellan udda och jämna veckor, matchvecka 1–9 2026/27): istid 0,87, tacklingar och
+# blockerade skott runt 0,57, skott 0,46, mål och assist 0,29, utvisningar 0,11, plus/minus 0,05,
+# matchavgörande mål 0,04. Den sista gruppen ersätts helt av positionens snitt.
+STABLE_CATEGORIES = (
+    "time_on_ice_points",
+    "hits_points",
+    "blocked_shots_points",
+    "faceoffs_won_points",
+    "shots_on_goal_points",
+)
+SCORING_CATEGORIES = ("goals_points", "assists_points", "shorthanded_goals_points")
+NOISE_CATEGORIES = ("plus_minus_points", "game_winning_goals_points", "penalty_minutes_points", "other_points")
+SKATER_CATEGORIES = STABLE_CATEGORIES + SCORING_CATEGORIES + NOISE_CATEGORIES
+
+
+def category_means(rows: Iterable[tuple[str, dict[str, int], int]]) -> dict[str, dict[str, float]]:
+    """Positionens snitt per kategori och spelad match. rows = (position, kategorier, matcher)."""
+    totals: dict[str, dict[str, float]] = {}
+    games: dict[str, int] = {}
+    for pos, cats, gp in rows:
+        if pos == "GK" or not gp:
+            continue
+        t = totals.setdefault(pos, dict.fromkeys(SKATER_CATEGORIES, 0.0))
+        for c in SKATER_CATEGORIES:
+            t[c] += cats.get(c, 0)
+        games[pos] = games.get(pos, 0) + gp
+    return {pos: {c: v / games[pos] for c, v in t.items()} for pos, t in totals.items()}
+
+
+def categories_complete(cats: dict[str, int], total_points: int) -> bool:
+    """Kategorimodellen används bara när fördelningen går ihop med totalen. Annars (t.ex. om
+    kolumnerna saknas i exporten) skulle spelaren få 0 poäng."""
+    return abs(sum(cats.get(c, 0) for c in SKATER_CATEGORIES) - total_points) <= 1
+
+
+def category_ppg(cats: dict[str, int], games: int, means: dict[str, float], params: Params) -> float:
+    """Poäng per match där varje kategori krymps för sig: istid och andra stabila kategorier
+    nästan inte alls, mål och assist hårt, och tur-kategorierna ersätts av positionens snitt."""
+    total = 0.0
+    for group, k in ((STABLE_CATEGORIES, params.stable_shrink), (SCORING_CATEGORIES, params.scoring_shrink)):
+        for c in group:
+            total += (cats.get(c, 0) + k * means.get(c, 0.0)) / (games + k)
+    total += sum(means.get(c, 0.0) for c in NOISE_CATEGORIES)
+    return total
+
 
 # Används när man väljer att väga in poängtrenden i den långsiktiga planeraren. Backtesten
 # säger att det gör prognosen marginellt sämre, så vikten hålls låg.

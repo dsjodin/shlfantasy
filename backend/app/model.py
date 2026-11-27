@@ -7,8 +7,10 @@ Modellen är medvetet enkel och transparent:
    spelare efter förväntad poäng per match, så priset är en bra "prior".
 2. Speltid = andel av lagets matcher spelaren har spelat (viktigt för t.ex. målvakter).
    Speltidsandelen räknas med senaste veckorna tyngst (speltidstrend, se trend.py).
-3. Formen (snitt senaste fem lagmatcher, inkl. nollor) vägs in lätt. Plus/minus-poäng
-   räknas bort eftersom de mest speglar tur (PDO) och inte håller i sig.
+3. Formen (snitt senaste fem lagmatcher, inkl. nollor) vägs in lätt.
+   För utespelare räknas poäng per match kategori för kategori (projection.category_ppg):
+   istid litas på nästan helt, mål och assist krymps hårt, och plus/minus, utvisningar och
+   matchavgörande mål ersätts av positionens snitt eftersom de mest är tur.
 4. xP för en vecka = summan över lagets matcher den veckan av förväntat per lagmatch,
    justerat för motståndarens styrka, hemmaplan och skada/frånvaro.
 
@@ -23,7 +25,18 @@ from datetime import date
 from typing import Any
 
 from .datastore import Snapshot
-from .projection import DEFAULT_PARAMS, Params, TeamStrength, expected_per_game, game_multiplier, price_priors, team_strength
+from .projection import (
+    DEFAULT_PARAMS,
+    Params,
+    TeamStrength,
+    categories_complete,
+    category_means,
+    category_ppg,
+    expected_per_game,
+    game_multiplier,
+    price_priors,
+    team_strength,
+)
 from .rules import POSITIONS
 from .trend import FLAT, Trend, WeekStat, recent_play_rate
 from .trend import compute as compute_trend
@@ -152,6 +165,11 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             history[pid].append({"gameweek": int(key), **row})
 
     priors = price_priors(snap.players, POSITIONS)
+    cat_means = category_means(
+        (r["position"], r["breakdown"], r["games_played"])
+        for r in snap.players
+        if categories_complete(r["breakdown"], r["total_points"])
+    )
     strength = team_strength((g for g in games if g["played"]), params.team_prior_games)
     birthdates = snap.birthdates
     upcoming = [gw["number"] for gw in gameweeks if gw["status"] == "upcoming"]
@@ -186,10 +204,18 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
         recent_play = (
             recent_play_rate(weeks, params.play_half_life) if p.status == "active" and history_complete else None
         )
+        use_categories = (
+            params.category_model
+            and p.position != "GK"
+            and p.games_played
+            and p.position in cat_means
+            and categories_complete(p.breakdown, p.total_points)
+        )
+        ppg = category_ppg(p.breakdown, p.games_played, cat_means[p.position], params) if use_categories else p.ppg
         per_game, p.play_rate = expected_per_game(
             price=p.price,
             games_played=p.games_played,
-            ppg=p.ppg,
+            ppg=ppg,
             form=p.form,
             team_games=team_games_played.get(p.club, 0),
             prior=priors[p.position],

@@ -36,7 +36,10 @@ def test_recent_play_rate_weights_latest_week():
 
 
 def test_pdo_correction_lowers_plus_minus_heavy_player():
-    args = dict(price=8.0, games_played=10, ppg=6.0, form=6.0, team_games=10, prior=(1.0, 0.5), params=DEFAULT_PARAMS)
+    from dataclasses import replace
+
+    params = replace(DEFAULT_PARAMS, pdo_weight=1.0)
+    args = {"price": 8.0, "games_played": 10, "ppg": 6.0, "form": 6.0, "team_games": 10, "prior": (1.0, 0.5), "params": params}
     lucky, _ = expected_per_game(**args, pm_per_game=2.0)
     neutral, _ = expected_per_game(**args, pm_per_game=0.0)
     assert lucky < neutral
@@ -115,3 +118,34 @@ def test_free_transfer_walk():
     walk = optimizer._free_transfer_walk(0, [2, 0, 1, 3])
     assert [w["free_before"] for w in walk] == [0, 1, 2, 2]
     assert [w["penalty"] for w in walk] == [20, 0, 0, 10]
+
+
+# ---------------------------------------------------------------- kategorimodellen
+
+
+def test_category_model_trusts_ice_time_but_not_luck():
+    from dataclasses import replace
+
+    from app.projection import categories_complete, category_means, category_ppg
+
+    means = category_means(
+        [
+            ("F", {"time_on_ice_points": 20, "goals_points": 8, "plus_minus_points": 0}, 10),
+            ("F", {"time_on_ice_points": 20, "goals_points": 8, "plus_minus_points": 0}, 10),
+        ]
+    )["F"]
+    params = replace(DEFAULT_PARAMS, category_model=True)
+    base = category_ppg({"time_on_ice_points": 20, "goals_points": 8}, 10, means, params)
+    more_ice = category_ppg({"time_on_ice_points": 30, "goals_points": 8}, 10, means, params)
+    more_goals = category_ppg({"time_on_ice_points": 20, "goals_points": 18}, 10, means, params)
+    lucky = category_ppg({"time_on_ice_points": 20, "goals_points": 8, "plus_minus_points": 10}, 10, means, params)
+    # Lika stor skillnad i poäng: istid slår igenom mer än mål, plus/minus inte alls
+    assert more_ice - base > more_goals - base > 0
+    assert abs(lucky - base) < 1e-9
+    assert categories_complete({"time_on_ice_points": 20, "goals_points": 8}, 28)
+    assert not categories_complete({}, 28)
+
+
+def test_model_falls_back_without_categories(model):
+    # Testdatan saknar poängfördelning, så modellen ska använda poäng per match som vanligt
+    assert all(p.xp_per_game > 0 for p in model.players.values())

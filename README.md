@@ -42,9 +42,22 @@ Varje spelare har en formtrend som jämför de senaste veckorna med säsongen, b
 
 - Speltidstrenden förbättrar prognosen och räknas in i xP. En spelare som petats eller fått en större roll fortsätter oftast så.
 - Poängtrenden gör prognosen något sämre. En het poängperiod håller sällan i sig, så den visas som information men räknas inte in. I den långsiktiga planeraren kan man ändå välja att väga in den.
-- Plus/minus-poängen räknas bort. De styrs till stor del av lagets skott- och räddningsprocent när spelaren är på isen (det som kallas PDO), och det jämnar ut sig. Spelare med mycket plus/minus-poäng presterade klart sämre än modellen trodde, och korrigeringen förbättrade sex av åtta testveckor.
+- Plus/minus-poängen räknas som tur. De styrs till stor del av lagets skott- och räddningsprocent när spelaren är på isen (det som kallas PDO), och det jämnar ut sig. Spelare med mycket plus/minus-poäng presterade klart sämre än modellen trodde.
 
-Med de här ändringarna gick medelfelet från 4,38 till 4,21 poäng per spelare och vecka (matchvecka 2–9), och korrelationen från 0,45 till 0,47.
+### Kategorimodellen
+
+För utespelare räknas poäng per match kategori för kategori, eftersom kategorierna är olika pålitliga. Mätt som korrelation mellan udda och jämna matchveckor (vecka 1–9):
+
+| Kategori | Andel av poängen | Upprepar sig |
+|---|---|---|
+| Istid | 56 % | 0,87 |
+| Tacklingar, blockerade skott | 9 % | 0,56–0,59 |
+| Mål och assist | 36 % | 0,29 |
+| Utvisningar, plus/minus, matchavgörande mål | −4 % | 0,04–0,11 |
+
+Istiden, mer än halva poängen, är alltså nästan helt förutsägbar medan mål och assist till stor del är slump. Därför litar modellen nästan helt på spelarens egen istid, krymper mål och assist hårt mot positionens snitt och ersätter tur-kategorierna helt med snittet. Målvakter räknas som tidigare.
+
+Sammantaget gick medelfelet från 4,38 till 4,16 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,48 och bästa elvan från 46 % till 53 %. Kategorimodellen förbättrade bästa elvan i sju av åtta veckor. Vinsten är störst tidigt i säsongen, när få matcher gör det viktigast att veta vilka poäng som är slump.
 
 Modellen vet fortfarande ingenting om kedjor, powerplay-roller eller nyheter. Där kommer AI-rådgivaren in: den kan söka på webben efter skador, laguppställningar och målvaktsbesked innan den rekommenderar något, och visar källorna.
 

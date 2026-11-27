@@ -23,7 +23,18 @@ from typing import Any
 
 from .datastore import Snapshot
 from .model import assign_gameweek
-from .projection import DEFAULT_PARAMS, POINTS_TREND_WEIGHT_OPTION, Params, expected_per_game, game_multiplier, price_priors, team_strength
+from .projection import (
+    DEFAULT_PARAMS,
+    POINTS_TREND_WEIGHT_OPTION,
+    Params,
+    categories_complete,
+    category_means,
+    category_ppg,
+    expected_per_game,
+    game_multiplier,
+    price_priors,
+    team_strength,
+)
 from .rules import LINEUP_COMPOSITION, POSITIONS
 from .trend import WeekStat, plus_minus_per_game, recent_play_rate
 from .trend import compute as compute_trend
@@ -44,6 +55,7 @@ class Row:
     fixtures: list[tuple[str, bool]]  # (motståndare, hemma) veckan som förutsägs
     actual: int
     weeks: list[WeekStat]  # spelarens veckor före den som förutsägs
+    cats: dict[str, int]  # poäng per kategori före veckan
 
 
 @dataclass
@@ -106,6 +118,7 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
                     team_games=sum(n for w, n in team_games[club].items() if w < wk),
                     fixtures=fixtures,
                     actual=actual_week[p["id"]]["points"],
+                    cats=_sum_cats(past.values()),
                     weeks=[
                         WeekStat(
                             w,
@@ -123,16 +136,33 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
     return weeks
 
 
+def _sum_cats(rows) -> dict[str, int]:
+    total: dict[str, int] = defaultdict(int)
+    for r in rows:
+        for c, v in r.get("cats", {}).items():
+            total[c] += v
+    return dict(total)
+
+
 def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
     priors = price_priors([asdict(r) for r in week.rows], POSITIONS)
+    complete = {r.pid for r in week.rows if categories_complete(r.cats, round(r.ppg * r.games_played))}
+    means = category_means((r.position, r.cats, r.games_played) for r in week.rows if r.pid in complete)
     strength = team_strength(week.played_before, params.team_prior_games)
     out = []
     for r in week.rows:
         trend = compute_trend(r.weeks, params.play_half_life) if params.points_trend_weight else None
+        use_categories = (
+            params.category_model
+            and r.position != "GK"
+            and r.games_played
+            and r.position in means
+            and r.pid in complete
+        )
         per_game, _ = expected_per_game(
             price=r.price,
             games_played=r.games_played,
-            ppg=r.ppg,
+            ppg=category_ppg(r.cats, r.games_played, means[r.position], params) if use_categories else r.ppg,
             form=r.form,
             team_games=r.team_games,
             prior=priors[r.position],
@@ -203,8 +233,10 @@ def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
     models.append({"key": "basic", "name": "Modellen utan motstånd/hemmaplan", **evaluate(weeks, no_opp)})
     no_play = replace(params, recent_play_weight=0.0)
     models.append({"key": "no_play_trend", "name": "Modellen utan speltidstrend", **evaluate(weeks, no_play)})
-    no_pdo = replace(params, pdo_weight=0.0)
-    models.append({"key": "no_pdo", "name": "Modellen utan PDO-korrigering", **evaluate(weeks, no_pdo)})
+    no_cat = replace(params, category_model=False, pdo_weight=1.0)
+    models.append({"key": "no_categories", "name": "Modellen utan kategorivikter (bara PDO)", **evaluate(weeks, no_cat)})
+    no_pdo = replace(params, category_model=False, pdo_weight=0.0)
+    models.append({"key": "no_pdo", "name": "Modellen utan kategorivikter och PDO", **evaluate(weeks, no_pdo)})
     with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
     models.append({"key": "points_trend", "name": "Modellen med poängtrend", **evaluate(weeks, with_points)})
     models.append({"key": "current", "name": "Modellen som används", **evaluate(weeks, params)})
@@ -221,7 +253,16 @@ def tune(snap: Snapshot) -> tuple[Params, dict[str, Any]]:
     i DEFAULT_PARAMS, steg 2 söker trendvikterna med steg 1:s bästa grund."""
     weeks = build_weeks(snap)
     trend_fixed = {
-        k: getattr(DEFAULT_PARAMS, k) for k in ("recent_play_weight", "play_half_life", "points_trend_weight", "pdo_weight")
+        k: getattr(DEFAULT_PARAMS, k)
+        for k in (
+            "recent_play_weight",
+            "play_half_life",
+            "points_trend_weight",
+            "pdo_weight",
+            "category_model",
+            "stable_shrink",
+            "scoring_shrink",
+        )
     }
     best: tuple[float, Params, dict[str, Any]] | None = None
     for ps, fw, ow, gw, ha in itertools.product(
@@ -239,13 +280,16 @@ def tune(snap: Snapshot) -> tuple[Params, dict[str, Any]]:
             best = (result["mae"], params, result)
     assert best is not None
     base = best[1]
-    for rw, hl, tw, pdo in itertools.product(
+    for rw, hl, tw, ks, kc in itertools.product(
         (0.0, 0.5, 1.0),  # recent_play_weight
-        (1.0, 1.5, 2.0, 3.0),  # play_half_life
-        (0.0, 0.15, 0.3, 0.5),  # points_trend_weight
-        (0.0, 0.25, 0.5, 0.75, 1.0),  # pdo_weight
+        (1.0, 2.0),  # play_half_life
+        (0.0, 0.3),  # points_trend_weight
+        (0.5, 2.0),  # stable_shrink
+        (5.0, 10.0, 20.0),  # scoring_shrink
     ):
-        params = replace(base, recent_play_weight=rw, play_half_life=hl, points_trend_weight=tw, pdo_weight=pdo)
+        params = replace(
+            base, recent_play_weight=rw, play_half_life=hl, points_trend_weight=tw, stable_shrink=ks, scoring_shrink=kc
+        )
         result = evaluate(weeks, params)
         if result["mae"] < best[0]:
             best = (result["mae"], params, result)
