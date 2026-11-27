@@ -24,6 +24,7 @@ class Params:
     category_model: bool = False
     stable_shrink: float = 0.5  # istid, tacklingar, blockerade skott, tekningar, skott
     scoring_shrink: float = 10.0  # mål och assist
+    toi_trend_weight: float = 0.0  # hur mycket ändrad istid (senaste veckorna mot säsongen) slår igenom
 
 
 # Valda med backtest mot matchvecka 2–5 säsongen 2026/27 (python -m app.backtest --tune).
@@ -48,6 +49,8 @@ DEFAULT_PARAMS = Params(
     category_model=True,
     stable_shrink=0.5,
     scoring_shrink=10.0,
+    # Istidstrend från matchrapporterna: bättre eller lika i alla testveckor (README).
+    toi_trend_weight=1.0,
 )
 
 # Poängkategorier för utespelare, grupperade efter hur väl de upprepar sig från vecka till vecka
@@ -96,6 +99,9 @@ def category_ppg(cats: dict[str, int], games: int, means: dict[str, float], para
     total += sum(means.get(c, 0.0) for c in NOISE_CATEGORIES)
     return total
 
+
+# Gränser för istidstrenden, så att en enstaka konstig matchrapport inte slår för hårt
+TOI_RATIO_BOUNDS = (0.5, 1.5)
 
 # Används när man väljer att väga in poängtrenden i den långsiktiga planeraren. Backtesten
 # säger att det gör prognosen marginellt sämre, så vikten hålls låg.
@@ -153,6 +159,7 @@ def expected_per_game(
     recent_play: float | None = None,
     ppg_delta: float = 0.0,
     pm_per_game: float = 0.0,
+    toi_ratio: float | None = None,
 ) -> tuple[float, float]:
     """Förväntade poäng per lagmatch och speltidsandel.
 
@@ -163,6 +170,9 @@ def expected_per_game(
     skott- och räddningsprocent när spelaren är på isen (PDO), som brukar jämna ut sig. En
     spelare med mycket plus/minus-poäng har därför ofta haft tur, och en del av de poängen
     räknas bort. Gäller inte målvakter (de får inga plus/minus-poäng).
+
+    toi_ratio är istiden senaste veckorna delat med säsongens (utespelare). Ändrad istid
+    betyder ändrad roll, och det slår igenom på alla poäng.
     """
     intercept, slope = prior
     prior_ppg = max(intercept + slope * price, 0.5)
@@ -179,6 +189,9 @@ def expected_per_game(
     per_game += params.points_trend_weight * ppg_delta * play_rate
     # Samma andel som spelarens egen statistik väger i krympningen ovan
     per_game -= params.pdo_weight * pm_per_game * gp / (gp + params.prior_strength) * play_rate
+    if toi_ratio is not None and params.toi_trend_weight:
+        ratio = min(max(toi_ratio, TOI_RATIO_BOUNDS[0]), TOI_RATIO_BOUNDS[1])
+        per_game *= 1 + params.toi_trend_weight * (ratio - 1)
     return max(per_game, 0.0), play_rate
 
 

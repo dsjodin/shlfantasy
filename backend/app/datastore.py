@@ -38,6 +38,8 @@ class Snapshot:
     # {athlete_uuid: {"player_id": ..., "birth_date": ...}}
     athletes: dict[str, dict[str, str]] = field(default_factory=dict)
     athletes_fetched_at: str | None = None
+    # Istid per spelad match från shl.se:s matchrapporter: {game_id: {player_id: sekunder}}
+    boxscores: dict[str, dict[str, int]] = field(default_factory=dict)
     fetched_at: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -97,6 +99,8 @@ class DataStore:
                     snap.errors.append(f"Matchschema: {exc!r}")
                     log.exception("Kunde inte hämta matchschema")
 
+                await self._refresh_boxscores(client, snap)
+
                 if include_birthdates is None:
                     include_birthdates = _is_stale(snap.athletes_fetched_at, BIRTHDATE_REFRESH_DAYS)
                 if include_birthdates and snap.teams:
@@ -138,6 +142,17 @@ class DataStore:
             snap.gameweek_points[key] = points
             if gw["status"] == "completed" and _days_since(gw["end"]) >= 2 and key not in snap.final_gameweeks:
                 snap.final_gameweeks.append(key)
+
+
+    async def _refresh_boxscores(self, client: httpx.AsyncClient, snap: Snapshot) -> None:
+        """Spelade matcher hämtas en gång. Saknas rapporten görs ett nytt försök nästa gång."""
+        missing = [g["id"] for g in snap.games if g["played"] and g["id"] not in snap.boxscores]
+        if not missing:
+            return
+        reports, failed = await shl.fetch_boxscores(client, missing)
+        snap.boxscores.update(reports)
+        if failed:
+            snap.errors.append(f"Matchrapporter: {len(failed)} av {len(missing)} gick inte att hämta")
 
 
 def _now() -> str:

@@ -1,4 +1,4 @@
-import { STATUS_LABELS, mkr, num, signed } from "../format";
+import { STATUS_LABELS, minutes, mkr, num, signed } from "../format";
 import type { Player, Trend } from "../types";
 
 const TREND_ICON = { up: "▲", down: "▼", flat: "▬" } as const;
@@ -11,7 +11,10 @@ export function TrendArrow({ trend }: { trend?: Trend }) {
       ? trend.reason
       : `${trend.reason}. Senaste veckorna ${num(trend.recent_ppg)} p/match mot ${num(trend.season_ppg)} för säsongen ` +
         `(${signed(trend.ppg_delta)}). Speltid ${Math.round(trend.recent_play_rate * 100)} % mot ` +
-        `${Math.round(trend.season_play_rate * 100)} %.`;
+        `${Math.round(trend.season_play_rate * 100)} %.` +
+        (trend.season_toi && trend.recent_toi
+          ? ` Istid ${minutes(trend.recent_toi)} per match mot ${minutes(trend.season_toi)}.`
+          : "");
   return (
     <span className={`trend trend-${trend.direction}`} title={title} aria-label={title}>
       {TREND_ICON[trend.direction]}

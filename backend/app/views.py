@@ -67,6 +67,8 @@ def compact_player(model: Model, p: Player, gameweeks: list[int]) -> dict:
         "trend": p.trend.direction,
         "trend_ppg_delta": round(p.trend.ppg_delta, 1),
         "recent_play_rate": round(p.trend.recent_play_rate, 2),
+        "toi_min": round(p.trend.recent_toi, 1) if p.trend.recent_toi else None,
+        "toi_min_season": round(p.trend.season_toi, 1) if p.trend.season_toi else None,
     }
 
 

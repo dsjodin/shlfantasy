@@ -38,7 +38,7 @@ from .projection import (
     team_strength,
 )
 from .rules import POSITIONS
-from .trend import FLAT, Trend, WeekStat, recent_play_rate
+from .trend import FLAT, Trend, WeekStat, recent_play_rate, toi_by_week, toi_ratio
 from .trend import compute as compute_trend
 
 # Multiplikator per vecka framåt (0 = nästa vecka) beroende på status
@@ -129,10 +129,20 @@ def assign_gameweek(day: str, gameweeks: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def _week_stats(history: list[dict[str, int]], team_games: dict[int, int]) -> list[WeekStat]:
+def _week_stats(
+    history: list[dict[str, int]], team_games: dict[int, int], toi: dict[int, tuple[int, int]] | None = None
+) -> list[WeekStat]:
     by_week = {h["gameweek"]: h for h in history}
+    toi = toi or {}
     return [
-        WeekStat(gw, by_week.get(gw, {}).get("games", 0), by_week.get(gw, {}).get("points", 0), n)
+        WeekStat(
+            gw,
+            by_week.get(gw, {}).get("games", 0),
+            by_week.get(gw, {}).get("points", 0),
+            n,
+            by_week.get(gw, {}).get("pm", 0),
+            *toi.get(gw, (0, 0)),
+        )
         for gw, n in sorted(team_games.items())
     ]
 
@@ -165,6 +175,7 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             history[pid].append({"gameweek": int(key), **row})
 
     priors = price_priors(snap.players, POSITIONS)
+    toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
     cat_means = category_means(
         (r["position"], r["breakdown"], r["games_played"])
         for r in snap.players
@@ -194,7 +205,7 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             birth_date=birthdates.get(raw["id"]),
             history=history.get(raw["id"], []),
         )
-        weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}))
+        weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}), toi.get(p.id))
         p.trend = compute_trend(weeks, params.play_half_life)
         # För skadade och frånvarande sköter statusen nedtrappningen. Speltidstrenden skulle
         # annars räkna frånvaron en gång till.
@@ -225,6 +236,7 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             pm_per_game=p.breakdown.get("plus_minus_points", 0) / p.games_played
             if p.games_played and p.position != "GK"
             else 0.0,
+            toi_ratio=toi_ratio(weeks) if p.position != "GK" else None,
         )
         p.xp_per_game = round(per_game, 2)
 
