@@ -23,8 +23,10 @@ from typing import Any
 
 from .datastore import Snapshot
 from .model import assign_gameweek
-from .projection import DEFAULT_PARAMS, Params, expected_per_game, game_multiplier, price_priors, team_strength
+from .projection import DEFAULT_PARAMS, POINTS_TREND_WEIGHT_OPTION, Params, expected_per_game, game_multiplier, price_priors, team_strength
 from .rules import LINEUP_COMPOSITION, POSITIONS
+from .trend import WeekStat, plus_minus_per_game, recent_play_rate
+from .trend import compute as compute_trend
 
 FORM_TEAM_GAMES = 5
 
@@ -41,6 +43,7 @@ class Row:
     team_games: int
     fixtures: list[tuple[str, bool]]  # (motståndare, hemma) veckan som förutsägs
     actual: int
+    weeks: list[WeekStat]  # spelarens veckor före den som förutsägs
 
 
 @dataclass
@@ -103,6 +106,17 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
                     team_games=sum(n for w, n in team_games[club].items() if w < wk),
                     fixtures=fixtures,
                     actual=actual_week[p["id"]]["points"],
+                    weeks=[
+                        WeekStat(
+                            w,
+                            past.get(w, {}).get("games", 0),
+                            past.get(w, {}).get("points", 0),
+                            n,
+                            past.get(w, {}).get("pm", 0),
+                        )
+                        for w, n in sorted(team_games[club].items())
+                        if w < wk
+                    ],
                 )
             )
         weeks.append(Week(wk, rows, [g for g in games if g["gameweek"] and g["gameweek"] < wk]))
@@ -114,6 +128,7 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
     strength = team_strength(week.played_before, params.team_prior_games)
     out = []
     for r in week.rows:
+        trend = compute_trend(r.weeks, params.play_half_life) if params.points_trend_weight else None
         per_game, _ = expected_per_game(
             price=r.price,
             games_played=r.games_played,
@@ -122,6 +137,9 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
             team_games=r.team_games,
             prior=priors[r.position],
             params=params,
+            recent_play=recent_play_rate(r.weeks, params.play_half_life),
+            ppg_delta=trend.ppg_delta if trend else 0.0,
+            pm_per_game=plus_minus_per_game(r.weeks) if r.position != "GK" else 0.0,
         )
         mult = sum(game_multiplier(r.position, opp, home, strength, params) for opp, home in r.fixtures)
         out.append((r, per_game * mult))
@@ -183,6 +201,12 @@ def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
     models = [{"key": key, "name": name, **evaluate(weeks, p)} for key, (name, p) in BASELINES.items()]
     no_opp = replace(params, opponent_weight=0.0, gk_opponent_weight=0.0, home_advantage=0.0)
     models.append({"key": "basic", "name": "Modellen utan motstånd/hemmaplan", **evaluate(weeks, no_opp)})
+    no_play = replace(params, recent_play_weight=0.0)
+    models.append({"key": "no_play_trend", "name": "Modellen utan speltidstrend", **evaluate(weeks, no_play)})
+    no_pdo = replace(params, pdo_weight=0.0)
+    models.append({"key": "no_pdo", "name": "Modellen utan PDO-korrigering", **evaluate(weeks, no_pdo)})
+    with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
+    models.append({"key": "points_trend", "name": "Modellen med poängtrend", **evaluate(weeks, with_points)})
     models.append({"key": "current", "name": "Modellen som används", **evaluate(weeks, params)})
     return {
         "weeks": [w.number for w in weeks],
@@ -192,23 +216,39 @@ def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
 
 
 def tune(snap: Snapshot) -> tuple[Params, dict[str, Any]]:
-    """Grovt rutnät: välj parametrar med lägst medelfel. Medvetet grovt för att inte
-    överanpassa till ett fåtal veckor."""
+    """Grovt rutnät i två steg: välj parametrar med lägst medelfel. Medvetet grovt för att
+    inte överanpassa till ett fåtal veckor. Steg 1 söker grundvikterna med trenden som den är
+    i DEFAULT_PARAMS, steg 2 söker trendvikterna med steg 1:s bästa grund."""
     weeks = build_weeks(snap)
-    grid = itertools.product(
+    trend_fixed = {
+        k: getattr(DEFAULT_PARAMS, k) for k in ("recent_play_weight", "play_half_life", "points_trend_weight", "pdo_weight")
+    }
+    best: tuple[float, Params, dict[str, Any]] | None = None
+    for ps, fw, ow, gw, ha in itertools.product(
         (2.0, 4.0, 8.0),  # prior_strength
         (0.0, 0.2, 0.35, 0.5),  # form_weight
         (0.0, 0.25, 0.5, 0.75),  # opponent_weight
         (0.0, 0.25, 0.5, 0.75),  # gk_opponent_weight
         (0.0, 0.03, 0.06),  # home_advantage
-    )
-    best: tuple[float, Params, dict[str, Any]] | None = None
-    for ps, fw, ow, gw, ha in grid:
-        params = Params(prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha)
+    ):
+        params = Params(
+            prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha, **trend_fixed
+        )
         result = evaluate(weeks, params)
         if best is None or result["mae"] < best[0]:
             best = (result["mae"], params, result)
     assert best is not None
+    base = best[1]
+    for rw, hl, tw, pdo in itertools.product(
+        (0.0, 0.5, 1.0),  # recent_play_weight
+        (1.0, 1.5, 2.0, 3.0),  # play_half_life
+        (0.0, 0.15, 0.3, 0.5),  # points_trend_weight
+        (0.0, 0.25, 0.5, 0.75, 1.0),  # pdo_weight
+    ):
+        params = replace(base, recent_play_weight=rw, play_half_life=hl, points_trend_weight=tw, pdo_weight=pdo)
+        result = evaluate(weeks, params)
+        if result["mae"] < best[0]:
+            best = (result["mae"], params, result)
     return best[1], best[2]
 
 

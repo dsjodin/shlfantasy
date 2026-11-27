@@ -32,7 +32,7 @@ class Snapshot:
     gameweeks: list[dict[str, Any]] = field(default_factory=list)
     games: list[dict[str, Any]] = field(default_factory=list)
     teams: list[dict[str, str]] = field(default_factory=list)
-    # {gameweek: {player_id: {"games": n, "points": p}}}
+    # {gameweek: {player_id: {"games": n, "points": p, "pm": plus/minus-poäng}}}
     gameweek_points: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     final_gameweeks: list[str] = field(default_factory=list)  # avslutade och korrigerade
     # {athlete_uuid: {"player_id": ..., "birth_date": ...}}
@@ -125,7 +125,10 @@ class DataStore:
             # Avslutade veckor hämtas om en gång (för korrigeringar), pågående varje gång.
             if gw["status"] == "upcoming":
                 continue
-            if key in snap.final_gameweeks and key in snap.gameweek_points:
+            cached = snap.gameweek_points.get(key)
+            # Veckor sparade före plus/minus-kolumnen hämtas om en gång
+            has_all_fields = not cached or "pm" in next(iter(cached.values()))
+            if key in snap.final_gameweeks and cached and has_all_fields:
                 continue
             try:
                 points = await fantasy.fetch_gameweek_points(client, gw["number"])
@@ -133,7 +136,7 @@ class DataStore:
                 snap.errors.append(f"Matchvecka {key}: {exc}")
                 continue
             snap.gameweek_points[key] = points
-            if gw["status"] == "completed" and _days_since(gw["end"]) >= 2:
+            if gw["status"] == "completed" and _days_since(gw["end"]) >= 2 and key not in snap.final_gameweeks:
                 snap.final_gameweeks.append(key)
 
 

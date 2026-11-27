@@ -38,9 +38,21 @@ export interface Player {
   games_next: number;
   xp: Record<string, number>;
   games: Record<string, number>;
+  trend: Trend;
   breakdown?: Record<string, number>;
   history?: { gameweek: number; games: number; points: number }[];
   fixtures?: Record<string, string[]>;
+}
+
+export interface Trend {
+  direction: "up" | "down" | "flat";
+  reason: string;
+  season_ppg: number;
+  recent_ppg: number;
+  ppg_delta: number;
+  season_play_rate: number;
+  recent_play_rate: number;
+  weeks: number;
 }
 
 export interface Issue {
@@ -127,6 +139,45 @@ export interface CardWeek {
   cards: Record<string, { name: string; gain: number | null; used: boolean }>;
   juniors: string[];
   veterans: string[];
+}
+
+export interface CardPlanItem {
+  gameweek: number;
+  card: string;
+  name: string;
+  gain: number;
+}
+
+export interface PlanWeek {
+  gameweek: number;
+  transfer_week: boolean;
+  out: string[];
+  in: string[];
+  free_before: number | null;
+  hits: number;
+  penalty: number;
+  expected_points: number;
+  hold_points: number;
+  captain: string | null;
+  bank_after: number;
+  player_ids: string[];
+}
+
+export interface TransferPlan {
+  gameweeks: number[];
+  transfer_weeks: number[];
+  weeks: PlanWeek[];
+  transfers: number;
+  penalty: number;
+  xp_plan: number;
+  xp_hold: number;
+  xp_gain: number;
+  net_gain: number;
+  weighted_net_gain: number;
+  final_player_ids: string[];
+  free_transfers_after: number;
+  trends: Record<string, Trend>;
+  points_trend: boolean;
 }
 
 export interface Gameweek {

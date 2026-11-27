@@ -1,5 +1,6 @@
 import type {
   Alternative,
+  CardPlanItem,
   CardWeek,
   ChatEvent,
   ModelQuality,
@@ -10,6 +11,7 @@ import type {
   Status,
   Suggestion,
   Team,
+  TransferPlan,
 } from "./types";
 
 let currentProfile: string | null = null;
@@ -85,7 +87,17 @@ export const api = {
   modelQuality: () => request<ModelQuality>("GET", "/api/model-quality"),
   saveTeam: (team: TeamInput) => request<Team>("PUT", "/api/team", team),
   validateTeam: (team: TeamInput) => request<Team>("POST", "/api/team/validate", team),
-  cards: (weeks: number) => request<{ weeks: CardWeek[] }>("GET", `/api/cards?weeks=${weeks}`),
+  cards: (weeks: number) =>
+    request<{ weeks: CardWeek[]; plan: CardPlanItem[]; used_cards: string[] }>("GET", `/api/cards?weeks=${weeks}`),
+  setUsedCards: (used_cards: string[]) => request<Team>("PUT", "/api/cards/used", { used_cards }),
+  plan: (opts: {
+    weeks: number;
+    max_per_week: number;
+    allow_hits: boolean;
+    points_trend: boolean;
+    keep?: string[];
+    avoid?: string[];
+  }) => request<TransferPlan>("POST", "/api/transfers/plan", opts),
   evaluate: (t: TransferInput) => request<Evaluation>("POST", "/api/transfers/evaluate", t),
   apply: (t: TransferInput) => request<Team>("POST", "/api/transfers/apply", t),
   suggest: (opts: { horizon: number; max_transfers: number; free_card: boolean; keep: string[]; avoid: string[] }) =>

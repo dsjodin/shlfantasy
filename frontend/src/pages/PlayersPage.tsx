@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { ModelQuality } from "../components/ModelQuality";
 import { PlayerDetail } from "../components/PlayerDetail";
-import { ClubBadge, PosBadge, StatusChip } from "../components/PlayerBits";
-import { num } from "../format";
+import { ClubBadge, PosBadge, StatusChip, TrendArrow } from "../components/PlayerBits";
+import { num, signed } from "../format";
 import { useApp } from "../state";
 import { POSITIONS, type Player } from "../types";
 
@@ -14,6 +14,12 @@ const COLUMNS: Col[] = [
   { key: "games_played", label: "M", title: "Spelade matcher", value: (p) => p.games_played, digits: 0 },
   { key: "ppg", label: "P/M", title: "Poäng per match", value: (p) => p.ppg },
   { key: "form", label: "Form", title: "Snitt senaste 5 lagmatcher", value: (p) => p.form },
+  {
+    key: "trend",
+    label: "Trend",
+    title: "Poäng per match senaste veckorna minus säsongssnittet. Pilen tar även hänsyn till ändrad speltid.",
+    value: (p) => p.trend.ppg_delta,
+  },
   { key: "games_next", label: "M nästa", title: "Matcher nästa vecka", value: (p) => p.games_next, digits: 0 },
   { key: "xp_next", label: "xP nästa", title: "Förväntade poäng nästa vecka", value: (p) => p.xp_next },
   { key: "xp_horizon", label: "xP period", title: "Förväntade poäng över vald period", value: (p) => p.xp_horizon },
@@ -28,6 +34,7 @@ export function PlayersPage() {
   const [club, setClub] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [onlyActive, setOnlyActive] = useState(true);
+  const [trendFilter, setTrendFilter] = useState("");
   const [sort, setSort] = useState<{ key: string; desc: boolean }>({ key: "xp_horizon", desc: true });
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -42,6 +49,7 @@ export function PlayersPage() {
       .filter((p) => !club || p.club === club)
       .filter((p) => !maxPrice || p.price <= Number(maxPrice))
       .filter((p) => !onlyActive || p.status === "active")
+      .filter((p) => !trendFilter || p.trend.direction === trendFilter)
       .filter((p) => !q || p.name.toLowerCase().includes(q))
       .sort((a, b) => {
         const va = col ? col.value(a) : a.name;
@@ -49,7 +57,7 @@ export function PlayersPage() {
         const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb), "sv");
         return sort.desc ? -cmp : cmp;
       });
-  }, [playerList, query, pos, club, maxPrice, onlyActive, sort]);
+  }, [playerList, query, pos, club, maxPrice, onlyActive, trendFilter, sort]);
 
   const header = (key: string, label: string, title?: string) => (
     <th
@@ -78,6 +86,12 @@ export function PlayersPage() {
           {clubs.map((c) => (
             <option key={c}>{c}</option>
           ))}
+        </select>
+        <select value={trendFilter} onChange={(e) => setTrendFilter(e.target.value)}>
+          <option value="">Alla trender</option>
+          <option value="up">Form uppåt</option>
+          <option value="down">Form nedåt</option>
+          <option value="flat">Stabil form</option>
         </select>
         <input
           type="number"
@@ -117,6 +131,12 @@ export function PlayersPage() {
                 </td>
                 {COLUMNS.map((c) => {
                   const v = c.value(p);
+                  if (c.key === "trend")
+                    return (
+                      <td key={c.key} className="nowrap">
+                        <TrendArrow trend={p.trend} /> {p.trend.weeks ? signed(p.trend.ppg_delta) : ""}
+                      </td>
+                    );
                   return <td key={c.key}>{typeof v === "number" ? num(v, c.digits ?? 1) : v}</td>;
                 })}
               </tr>

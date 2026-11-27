@@ -21,9 +21,10 @@ Profilerna har inget lösenord. Det räcker på hemnätet men betyder att vem so
 - Profiler: ett eget lag per familjemedlem.
 - Mitt lag: trupp, bank, gratisbyten och använda coachkort, med regelkontroll och föreslagen laguttagning (två femmor, målvakt, kapten och assisterande kapten).
 - Byten: välj vem som ska ut och se direkt vad du har att lägga, vilka som är möjliga och modellens bästa ersättare. Kalkylatorn visar bank efter byte, poängavdrag och förväntad poängförändring vecka för vecka. Optimeraren räknar fram bästa kombinationen av 1 till 4 byten, eller ett helt nytt lag med Fria Byten.
-- Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, samt matchschema per lag och vecka.
-- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare.
-- AI-rådgivare: chatt med Claude som har verktyg för att läsa ditt lag, söka spelare, räkna på byten och köra optimeraren. Från bytessidan kan du också låta AI:n granska ett planerat byte.
+- Långsiktig byteskedja: planerar byten vecka för vecka över 2 till 6 veckor. Gratisbyten sparas (max 2) och varje extra byte kostar 10 poäng, så planen avgör om det lönar sig att ta avdrag nu eller vänta på nästa gratisbyte. Särskilt användbart när gratisbytena är slut. Två veckor efter planen räknas också med, så att sena byten måste hålla även efteråt.
+- Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, en kortplan som fördelar de kort du har kvar med högst ett kort per vecka, och matchschema per lag och vecka. Förbrukade kort markeras direkt på sidan.
+- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare, inklusive formtrend (pil uppåt eller nedåt).
+- AI-rådgivare: chatt med Claude som har verktyg för att läsa ditt lag, söka spelare, räkna på byten, köra optimeraren och planera byteskedjor. Från bytessidan kan du också låta AI:n granska ett planerat byte.
 
 ## Så räknas xP (förväntade poäng)
 
@@ -34,6 +35,16 @@ Vikterna är inte gissade utan framtagna med en backtest: för varje redan spela
 Efter matchvecka 2–5 säsongen 2026/27 såg det ut så här: modellen missar i snitt 4,6 poäng per spelare och vecka, och dess bästa elva tog 48 % av poängen som den bästa möjliga elvan i efterhand fick. Säsongssnitt rakt av gav 5,7 respektive 34 %. Motstånd och hemmaplan förbättrade resultatet i tre av fyra veckor. Det säger två saker: modellen är klart bättre än att gå på snittet, och veckopoäng i hockey är så slumpmässiga att ingen modell kommer att träffa enskilda spelare särskilt bra. Värdet ligger i att välja rätt oftare.
 
 Backtesten har en svaghet som bör sägas rakt ut. Fantasy SHL publicerar inte historiska priser, så testet använder dagens pris, som redan har påverkats av de veckor som testas. Det gör att priset ser något klokare ut i efterhand än det var, och därför väger modellen priset lite lägre än vad backtesten själv föreslår.
+
+### Formtrend och PDO
+
+Varje spelare har en formtrend som jämför de senaste veckorna med säsongen, både i poäng per match och i andel av lagets matcher spelaren faktiskt spelat. Båda testades i backtesten mot matchvecka 2–9:
+
+- Speltidstrenden förbättrar prognosen och räknas in i xP. En spelare som petats eller fått en större roll fortsätter oftast så.
+- Poängtrenden gör prognosen något sämre. En het poängperiod håller sällan i sig, så den visas som information men räknas inte in. I den långsiktiga planeraren kan man ändå välja att väga in den.
+- Plus/minus-poängen räknas bort. De styrs till stor del av lagets skott- och räddningsprocent när spelaren är på isen (det som kallas PDO), och det jämnar ut sig. Spelare med mycket plus/minus-poäng presterade klart sämre än modellen trodde, och korrigeringen förbättrade sex av åtta testveckor.
+
+Med de här ändringarna gick medelfelet från 4,38 till 4,21 poäng per spelare och vecka (matchvecka 2–9), och korrelationen från 0,45 till 0,47.
 
 Modellen vet fortfarande ingenting om kedjor, powerplay-roller eller nyheter. Där kommer AI-rådgivaren in: den kan söka på webben efter skador, laguppställningar och målvaktsbesked innan den rekommenderar något, och visar källorna.
 
