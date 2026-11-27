@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { mkr, num } from "../format";
+import { mkr, num, signed } from "../format";
 import type { Player } from "../types";
-import { ClubBadge, PosBadge, StatusChip } from "./PlayerBits";
+import { ClubBadge, PosBadge, StatusChip, TrendArrow } from "./PlayerBits";
 
 const BREAKDOWN_LABELS: Record<string, string> = {
   goals_points: "Mål",
@@ -73,6 +73,20 @@ export function PlayerDetail({ id, onClose }: { id: string; onClose: () => void 
                 <strong>{num(p.xp_per_game)}</strong>
               </div>
             </div>
+            <h4>
+              Formtrend <TrendArrow trend={p.trend} />
+            </h4>
+            {p.trend.weeks === 0 ? (
+              <p className="hint">{p.trend.reason}.</p>
+            ) : (
+              <p className="hint">
+                {p.trend.reason}. Senaste veckorna {num(p.trend.recent_ppg)} poäng per match mot{" "}
+                {num(p.trend.season_ppg)} för säsongen ({signed(p.trend.ppg_delta)}). Speltid{" "}
+                {Math.round(p.trend.recent_play_rate * 100)} % av lagets matcher mot{" "}
+                {Math.round(p.trend.season_play_rate * 100)} % för säsongen. Ändrad speltid brukar hålla i sig och
+                räknas in i xP. En het poängperiod brukar inte göra det och räknas därför inte in.
+              </p>
+            )}
             <h4>Poäng per matchvecka</h4>
             <div className="history">
               {(p.history ?? []).map((h) => (

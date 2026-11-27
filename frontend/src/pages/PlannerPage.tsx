@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { date, signed } from "../format";
 import { useApp } from "../state";
-import type { CardWeek, Fixture } from "../types";
+import type { CardPlanItem, CardWeek, Fixture } from "../types";
 import { LineupCard } from "./TeamPage";
 
 const CARD_HELP: Record<string, string> = {
@@ -14,8 +14,10 @@ const CARD_HELP: Record<string, string> = {
 };
 
 export function PlannerPage() {
-  const { team, players } = useApp();
+  const { team, setTeam, players, status } = useApp();
   const [weeks, setWeeks] = useState<CardWeek[]>([]);
+  const [cardPlan, setCardPlan] = useState<CardPlanItem[]>([]);
+  const used = team?.used_cards ?? [];
   const [fixtures, setFixtures] = useState<Awaited<ReturnType<typeof api.fixtures>> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,14 +26,30 @@ export function PlannerPage() {
   }, []);
   useEffect(() => {
     if (!team?.player_ids.length) return;
-    api.cards(8).then((r) => setWeeks(r.weeks)).catch((e) => setError(String(e)));
+    api
+      .cards(8)
+      .then((r) => {
+        setWeeks(r.weeks);
+        setCardPlan(r.plan);
+      })
+      .catch((e) => setError(String(e)));
   }, [team]);
+
+  const toggleUsed = async (key: string) => {
+    const next = used.includes(key) ? used.filter((c) => c !== key) : [...used, key];
+    try {
+      setTeam(await api.setUsedCards(next));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const cardKeys = weeks[0] ? Object.keys(weeks[0].cards) : [];
   const best: Record<string, number> = {};
   for (const key of cardKeys) {
     best[key] = Math.max(...weeks.map((w) => w.cards[key].gain ?? -Infinity));
   }
+  const planned = new Map(cardPlan.map((c) => [`${c.gameweek}:${c.card}`, c]));
 
   return (
     <div className="page">
@@ -44,9 +62,31 @@ export function PlannerPage() {
           {weeks.length > 0 && (
             <section className="card">
               <h2>Coachkort – förväntad extra poäng</h2>
+              <div className="cards-used">
+                <span className="hint">Förbrukade kort:</span>
+                {Object.entries(status?.rules.cards ?? {}).map(([key, name]) => (
+                  <label key={key} className="check">
+                    <input type="checkbox" checked={used.includes(key)} onChange={() => void toggleUsed(key)} /> {name}
+                  </label>
+                ))}
+              </div>
+              <h3>Kortplan</h3>
+              {cardPlan.length === 0 ? (
+                <p className="hint">Inget kvarvarande kort ger minst 1 extra poäng de kommande veckorna. Spara korten.</p>
+              ) : (
+                <ul className="card-plan">
+                  {cardPlan.map((c) => (
+                    <li key={c.card}>
+                      <strong>v.{c.gameweek}</strong> {c.name} <span className="good">{signed(c.gain)} xP</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <p className="hint">
-                Jämfört med en vanlig vecka med kapten. Bästa veckan per kort är markerad. Räknat på din nuvarande trupp –
-                planerade byten ändrar bilden.
+                Bara ett coachkort får spelas per vecka, så planen fördelar korten du har kvar så att den sammanlagda
+                vinsten blir störst. Det kan betyda att ett kort hamnar på sin näst bästa vecka. Kort som inte finns med
+                sparas till senare i säsongen. Tabellen nedan visar varje kort för sig, jämfört med en vanlig vecka med
+                kapten. Räknat på din nuvarande trupp – planerade byten ändrar bilden.
               </p>
               <div className="table-wrap">
                 <table className="cards-table">
@@ -71,9 +111,15 @@ export function PlannerPage() {
                         </td>
                         {cardKeys.map((k) => {
                           const c = w.cards[k];
+                          const inPlan = planned.has(`${w.gameweek}:${k}`);
                           return (
-                            <td key={k} className={`${c.used ? "used" : ""} ${c.gain !== null && c.gain === best[k] ? "best" : ""}`}>
+                            <td
+                              key={k}
+                              className={`${c.used ? "used" : ""} ${!c.used && c.gain !== null && c.gain === best[k] ? "best" : ""} ${inPlan ? "planned" : ""}`}
+                              title={inPlan ? "Med i kortplanen" : undefined}
+                            >
                               {c.gain === null ? "–" : signed(c.gain)}
+                              {inPlan && " ★"}
                             </td>
                           );
                         })}
@@ -85,8 +131,8 @@ export function PlannerPage() {
               {weeks[0] && (
                 <p className="hint">
                   Juniorer i laget: {weeks[0].juniors.map((id) => players[id]?.name).join(", ") || "inga"}. Veteraner:{" "}
-                  {weeks[0].veterans.map((id) => players[id]?.name).join(", ") || "inga"}. Fria Byten räknas fram under
-                  Byten → Föreslå byten.
+                  {weeks[0].veterans.map((id) => players[id]?.name).join(", ") || "inga"}. ★ = med i kortplanen. Fria
+                  Byten räknas fram under Byten → Föreslå byten, och den veckan kan inget annat kort spelas.
                 </p>
               )}
             </section>

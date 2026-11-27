@@ -15,6 +15,10 @@ class Params:
     gk_opponent_weight: float = 0.0  # målvakter: effekt av motståndarens gjorda mål
     home_advantage: float = 0.0  # +x hemma, −x borta
     team_prior_games: float = 6.0  # krympning av lagstyrka mot ligasnittet
+    recent_play_weight: float = 0.0  # 0 = säsongens speltidsandel, 1 = senaste veckornas
+    play_half_life: float = 1.5  # veckor, för speltidstrenden
+    points_trend_weight: float = 0.0  # hur mycket poängtrenden (senaste veckorna mot säsongen) väger
+    pdo_weight: float = 0.0  # andel av plus/minus-poängen som antas vara tur och dras bort (utespelare)
 
 
 # Valda med backtest mot matchvecka 2–5 säsongen 2026/27 (python -m app.backtest --tune).
@@ -22,13 +26,23 @@ class Params:
 # pris som redan påverkats av testveckorna. Därför en försiktigare mellanväg för priset.
 # Motstånd och hemmaplan förbättrade i 3 av 4 veckor även i varianter utan pris.
 # Motståndseffekten för målvakter gav ingenting och är avstängd.
+# Speltidstrend, poängtrend och PDO-korrigering testades mot matchvecka 2–9 (se trend.py och
+# README). Speltidstrend och PDO-korrigering förbättrade, poängtrenden försämrade.
 DEFAULT_PARAMS = Params(
     prior_strength=6.0,
     form_weight=0.1,
     opponent_weight=0.5,
     gk_opponent_weight=0.0,
     home_advantage=0.06,
+    recent_play_weight=1.0,
+    play_half_life=1.0,
+    points_trend_weight=0.0,
+    pdo_weight=1.0,
 )
+
+# Används när man väljer att väga in poängtrenden i den långsiktiga planeraren. Backtesten
+# säger att det gör prognosen marginellt sämre, så vikten hålls låg.
+POINTS_TREND_WEIGHT_OPTION = 0.3
 
 
 @dataclass(frozen=True)
@@ -79,8 +93,20 @@ def expected_per_game(
     team_games: int,
     prior: tuple[float, float],
     params: Params,
+    recent_play: float | None = None,
+    ppg_delta: float = 0.0,
+    pm_per_game: float = 0.0,
 ) -> tuple[float, float]:
-    """Förväntade poäng per lagmatch och speltidsandel."""
+    """Förväntade poäng per lagmatch och speltidsandel.
+
+    recent_play är speltidsandelen de senaste veckorna (se trend.py) och ppg_delta
+    poängtrenden. Utelämnas de räknas bara säsongen.
+
+    pm_per_game är plus/minus-poäng per spelad match. Plus/minus styrs till stor del av lagets
+    skott- och räddningsprocent när spelaren är på isen (PDO), som brukar jämna ut sig. En
+    spelare med mycket plus/minus-poäng har därför ofta haft tur, och en del av de poängen
+    räknas bort. Gäller inte målvakter (de får inga plus/minus-poäng).
+    """
     intercept, slope = prior
     prior_ppg = max(intercept + slope * price, 0.5)
     gp = games_played
@@ -89,8 +115,14 @@ def expected_per_game(
         return quality, 1.0
     # Lätt krympning så att en enstaka missad match inte slår för hårt
     play_rate = min(1.0, (gp + 0.5) / (team_games + 0.5))
+    if recent_play is not None:
+        play_rate = (1 - params.recent_play_weight) * play_rate + params.recent_play_weight * recent_play
     base = quality * play_rate
-    return (1 - params.form_weight) * base + params.form_weight * form, play_rate
+    per_game = (1 - params.form_weight) * base + params.form_weight * form
+    per_game += params.points_trend_weight * ppg_delta * play_rate
+    # Samma andel som spelarens egen statistik väger i krympningen ovan
+    per_game -= params.pdo_weight * pm_per_game * gp / (gp + params.prior_strength) * play_rate
+    return max(per_game, 0.0), play_rate
 
 
 def game_multiplier(
