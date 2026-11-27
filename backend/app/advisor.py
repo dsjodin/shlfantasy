@@ -55,7 +55,8 @@ Så arbetar du:
   som redan är använt.
 - xP (förväntade poäng) kommer från en enkel statistisk modell: poäng per match krympt mot prisets
   förväntan, andel spelade lagmatcher (senaste veckorna tyngst), form och antal matcher per vecka.
-  Plus/minus-poäng räknas bort eftersom de mest är tur (PDO). Fältet trend visar om formen pekar
+  För utespelare räknas varje poängkategori för sig: istid (stabil) litas på, mål och assist krymps
+  hårt, och plus/minus, utvisningar och matchavgörande mål räknas som tur (PDO). Fältet trend visar om formen pekar
   upp eller ner. Backtesten visar att en het poängperiod oftast inte håller i sig, medan ändrad
   speltid gör det. Lyft trenden som information, men överdriv den inte. Den vet inget om kedjor,
   powerplay-roller, målvaktsrotation eller nyheter. Lyft sådana osäkerheter när de spelar roll och

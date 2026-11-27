@@ -32,7 +32,7 @@ class Snapshot:
     gameweeks: list[dict[str, Any]] = field(default_factory=list)
     games: list[dict[str, Any]] = field(default_factory=list)
     teams: list[dict[str, str]] = field(default_factory=list)
-    # {gameweek: {player_id: {"games": n, "points": p, "pm": plus/minus-poäng}}}
+    # {gameweek: {player_id: {"games": n, "points": p, "pm": plus/minus-poäng, "cats": {kategori: poäng}}}}
     gameweek_points: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     final_gameweeks: list[str] = field(default_factory=list)  # avslutade och korrigerade
     # {athlete_uuid: {"player_id": ..., "birth_date": ...}}
@@ -126,8 +126,8 @@ class DataStore:
             if gw["status"] == "upcoming":
                 continue
             cached = snap.gameweek_points.get(key)
-            # Veckor sparade före plus/minus-kolumnen hämtas om en gång
-            has_all_fields = not cached or "pm" in next(iter(cached.values()))
+            # Veckor sparade innan alla fält fanns (plus/minus, kategorier) hämtas om en gång
+            has_all_fields = not cached or "cats" in next(iter(cached.values()))
             if key in snap.final_gameweeks and cached and has_all_fields:
                 continue
             try:
