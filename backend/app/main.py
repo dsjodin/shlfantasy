@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 
 from . import backtest, optimizer
 from .advisor import Advisor, review_prompt
+from .archive import PredictionArchive
 from .config import get_settings
 from .datastore import DataStore
+from .memory import ProfileMemory, transfer_outcomes
 from .model import Model, build_model
 from .projection import DEFAULT_PARAMS, POINTS_TREND_WEIGHT_OPTION
 from .rules import COACH_CARDS, LINEUP_COMPOSITION, SQUAD_COMPOSITION
@@ -35,6 +37,7 @@ from .squad import (
     validate_squad,
 )
 from .team_store import ProfileNotFound, TeamStore
+from .tuning import ParamStore
 from .views import gameweek_view, player_view
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,19 +47,23 @@ log = logging.getLogger("shlfantasy")
 settings = get_settings()
 store = DataStore(settings.data_dir)
 teams = TeamStore(settings.data_dir)
-_model_cache: dict[str, Any] = {"version": -1, "model": None, "trend_model": None}
+archive = PredictionArchive(settings.data_dir)
+params_store = ParamStore(settings.data_dir)
+_model_cache: dict[str, Any] = {"version": None, "model": None, "trend_model": None}
 
 
 def current_model(points_trend: bool = False) -> Model:
-    """Modellen som används överallt. points_trend=True ger en variant där poängtrenden
-    vägs in, som ett val i den långsiktiga planeraren."""
-    if _model_cache["version"] != store.version or _model_cache["model"] is None:
-        _model_cache["model"] = build_model(store.snapshot)
+    """Modellen som används överallt, med de vikter som gäller just nu (se tuning.py).
+    points_trend=True ger en variant där poängtrenden vägs in, som ett val i den
+    långsiktiga planeraren."""
+    version = (store.version, params_store.version)
+    if _model_cache["version"] != version or _model_cache["model"] is None:
+        _model_cache["model"] = build_model(store.snapshot, params_store.current())
         _model_cache["trend_model"] = None
-        _model_cache["version"] = store.version
+        _model_cache["version"] = version
     if points_trend:
         if _model_cache["trend_model"] is None:
-            params = replace(DEFAULT_PARAMS, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
+            params = replace(params_store.current(), points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
             _model_cache["trend_model"] = build_model(store.snapshot, params)
         model = _model_cache["trend_model"]
     else:
@@ -70,7 +77,7 @@ advisor = (
     Advisor(
         settings.claude_model,
         settings.claude_effort,
-        lambda profile: (current_model(), teams.load(profile)),
+        lambda profile: (current_model(), teams.load(profile), ProfileMemory(teams, profile)),
         web_search=settings.web_search,
     )
     if settings.ai_enabled
@@ -78,10 +85,25 @@ advisor = (
 )
 
 
+async def _after_refresh() -> None:
+    """Spara veckans prognos och pröva nya vikter när en ny vecka är slutrapporterad."""
+    if not store.is_loaded:
+        return
+    gw = archive.record(current_model())
+    if gw:
+        log.info("Prognos för matchvecka %s sparad", gw)
+    entry = await asyncio.to_thread(params_store.maybe_tune, store.snapshot, archive)
+    if entry:
+        log.info("Viktjustering efter vecka %s: %s", entry["week"], entry["reason"])
+        if entry.get("adopted"):
+            archive.record(current_model())  # prognosen ska spegla de nya vikterna
+
+
 async def _refresh_loop() -> None:
     while True:
         try:
             await store.refresh()
+            await _after_refresh()
         except Exception:  # noqa: BLE001
             log.exception("Uppdatering misslyckades")
         await asyncio.sleep(settings.refresh_minutes * 60)
@@ -127,6 +149,7 @@ def status() -> dict:
 @app.post("/api/refresh")
 async def refresh(birthdates: bool = False) -> dict:
     await store.refresh(include_birthdates=True if birthdates else None)
+    await _after_refresh()
     return status()
 
 
@@ -164,11 +187,12 @@ _quality_cache: dict[str, Any] = {"version": -1, "report": None}
 @app.get("/api/model-quality")
 async def model_quality() -> dict:
     """Backtest: hur väl modellen hade förutsagt de matchveckor som redan är spelade."""
-    current_model()
-    if _quality_cache["version"] != store.version:
-        _quality_cache["report"] = await asyncio.to_thread(backtest.report, store.snapshot)
-        _quality_cache["version"] = store.version
-    return _quality_cache["report"]
+    model = current_model()
+    version = (store.version, params_store.version, tuple(archive.weeks()))
+    if _quality_cache["version"] != version:
+        _quality_cache["report"] = await asyncio.to_thread(backtest.report, store.snapshot, model.params, archive)
+        _quality_cache["version"] = version
+    return {**_quality_cache["report"], "tuning_log": params_store.log()[:10]}
 
 
 @app.get("/api/fixtures")
@@ -354,6 +378,7 @@ def transfers_apply(body: TransferIn, profile: str = Profile) -> dict:
     if body.free_card and "fria_byten" not in state.used_cards:
         state.used_cards.append("fria_byten")
     teams.save(profile, state)
+    ProfileMemory(teams, profile).log_transfer(model, body.out, body.into, result)
     return _team_response(model, state)
 
 
@@ -417,6 +442,34 @@ def transfers_alternatives(
 @app.get("/api/transfers/penalty")
 def penalty(transfers: int, free_transfers: int, free_card: bool = False) -> dict:
     return {"penalty": transfer_penalty(transfers, free_transfers, free_card)}
+
+
+# ---------------------------------------------------------------- minne
+
+
+class NoteIn(BaseModel):
+    text: str = Field(min_length=1, max_length=300)
+
+
+@app.get("/api/memory")
+def get_memory(profile: str = Profile) -> dict:
+    memory = ProfileMemory(teams, profile)
+    return {"notes": memory.notes(), "transfers": transfer_outcomes(current_model(), memory.transfers())[::-1]}
+
+
+@app.post("/api/memory/notes")
+def add_note(body: NoteIn, profile: str = Profile) -> dict:
+    try:
+        return ProfileMemory(teams, profile).add_note(body.text)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/memory/notes/{note_id}")
+def delete_note(note_id: str, profile: str = Profile) -> dict:
+    if not ProfileMemory(teams, profile).delete_note(note_id):
+        raise HTTPException(404, "Okänd anteckning")
+    return {"deleted": note_id}
 
 
 # ---------------------------------------------------------------- AI

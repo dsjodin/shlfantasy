@@ -82,6 +82,15 @@ class TeamStore:
     def load(self, profile_id: str) -> TeamState:
         return self._state(self._read(profile_id).get("team") or {})
 
+    def get_extra(self, profile_id: str, key: str, default=None):
+        """Övrig profildata (t.ex. AI-minnet) som ligger i samma fil som laget."""
+        return self._read(profile_id).get(key, default)
+
+    def set_extra(self, profile_id: str, key: str, value) -> None:
+        data = self._read(profile_id)
+        data[key] = value
+        write_json(self._path(profile_id), data)
+
     def save(self, profile_id: str, state: TeamState) -> None:
         data = self._read(profile_id)
         data["team"] = asdict(state)

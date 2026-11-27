@@ -4,9 +4,9 @@ För varje avslutad matchvecka byggs statistiken upp som den såg ut innan vecka
 (ur poängen per matchvecka och matchresultaten), modellen förutsäger veckan och
 förutsägelsen jämförs med utfallet.
 
-Begränsning: Fantasy SHL publicerar inte historiska priser, så dagens pris används.
-Priset rör sig högst ±0,1 Mkr per match, så felet är litet men gör priset något
-"klokare" i efterhand än det var.
+Begränsning: Fantasy SHL publicerar inte historiska priser. För veckor där prognosarkivet
+(archive.py) har sparat priserna vid deadline används de; annars dagens pris, som redan
+påverkats av de testade veckorna och därför gör priset något "klokare" i efterhand.
 
 Kör: python -m app.backtest [--tune]
 """
@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .archive import PredictionArchive
 from .datastore import Snapshot
 from .model import assign_gameweek
 from .projection import (
@@ -63,9 +64,10 @@ class Week:
     number: int
     rows: list[Row]
     played_before: list[dict[str, Any]]
+    archived_prices: bool = False
 
 
-def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
+def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_week: int = 2) -> list[Week]:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
     games = [{**g, "gameweek": assign_gameweek(g["date"], gameweeks)} for g in snap.games if g["played"]]
     toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
@@ -87,6 +89,8 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
         if wk < min_week:
             continue
         actual_week = snap.gameweek_points[str(wk)]
+        saved = (archive.load(wk) if archive else None) or {}
+        saved_players = saved.get("players", {})
         rows = []
         for p in snap.players:
             if p["position"] not in POSITIONS or p["id"] not in actual_week:
@@ -112,7 +116,7 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
                     pid=p["id"],
                     position=p["position"],
                     club=club,
-                    price=p["price"],
+                    price=saved_players.get(p["id"], {}).get("price", p["price"]),
                     games_played=gp,
                     ppg=pts / gp if gp else 0.0,
                     form=form_pts / form_games if form_games else 0.0,
@@ -134,7 +138,8 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
                     ],
                 )
             )
-        weeks.append(Week(wk, rows, [g for g in games if g["gameweek"] and g["gameweek"] < wk]))
+        played_before = [g for g in games if g["gameweek"] and g["gameweek"] < wk]
+        weeks.append(Week(wk, rows, played_before, archived_prices=bool(saved_players)))
     return weeks
 
 
@@ -179,28 +184,29 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
     return out
 
 
-def _lineup_actual(preds: list[tuple[Row, float]], key) -> int:
+Prediction = tuple[str, float, int]  # (position, xP, faktiska poäng)
+
+
+def _lineup_actual(preds: list[Prediction], by_prediction: bool) -> int:
     total = 0
     for pos, n in LINEUP_COMPOSITION.items():
-        ranked = sorted((p for p in preds if p[0].position == pos), key=key, reverse=True)
-        total += sum(r.actual for r, _ in ranked[:n])
+        ranked = sorted((p for p in preds if p[0] == pos), key=lambda p: p[1] if by_prediction else p[2], reverse=True)
+        total += sum(actual for _, _, actual in ranked[:n])
     return total
 
 
-def evaluate(weeks: list[Week], params: Params) -> dict[str, Any]:
+def score(weeks_of_predictions: list[list[Prediction]]) -> dict[str, Any]:
     errors, pairs = [], []
     by_pos: dict[str, list[float]] = defaultdict(list)
     efficiency = []
-    for week in weeks:
-        preds = predict(week, params)
-        for r, xp in preds:
-            errors.append(abs(xp - r.actual))
-            by_pos[r.position].append(abs(xp - r.actual))
-            pairs.append((xp, r.actual))
-        best = _lineup_actual(preds, key=lambda p: p[0].actual)
-        chosen = _lineup_actual(preds, key=lambda p: p[1])
+    for preds in weeks_of_predictions:
+        for pos, xp, actual in preds:
+            errors.append(abs(xp - actual))
+            by_pos[pos].append(abs(xp - actual))
+            pairs.append((xp, actual))
+        best = _lineup_actual(preds, by_prediction=False)
         if best > 0:
-            efficiency.append(chosen / best)
+            efficiency.append(_lineup_actual(preds, by_prediction=True) / best)
     return {
         "mae": round(sum(errors) / len(errors), 3) if errors else None,
         "correlation": round(_pearson(pairs), 3) if pairs else None,
@@ -208,6 +214,26 @@ def evaluate(weeks: list[Week], params: Params) -> dict[str, Any]:
         "mae_by_position": {pos: round(sum(v) / len(v), 3) for pos, v in by_pos.items()},
         "samples": len(errors),
     }
+
+
+def evaluate(weeks: list[Week], params: Params) -> dict[str, Any]:
+    return score([[(r.position, xp, r.actual) for r, xp in predict(w, params)] for w in weeks])
+
+
+def evaluate_archived(snap: Snapshot, archive: PredictionArchive) -> tuple[list[int], dict[str, Any] | None]:
+    """Exakt utvärdering: prognosen som sparades vid deadline mot utfallet."""
+    completed = {str(g["number"]) for g in snap.gameweeks if g["status"] == "completed"}
+    weeks, preds = [], []
+    for gw in archive.weeks():
+        actual = snap.gameweek_points.get(str(gw))
+        saved = archive.load(gw)
+        if str(gw) not in completed or not actual or not saved:
+            continue
+        weeks.append(gw)
+        preds.append(
+            [(row["position"], row["xp"], actual[pid]["points"]) for pid, row in saved["players"].items() if pid in actual]
+        )
+    return weeks, (score(preds) if preds else None)
 
 
 def _pearson(pairs: list[tuple[float, float]]) -> float:
@@ -227,8 +253,12 @@ BASELINES = {
 }
 
 
-def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
-    weeks = build_weeks(snap)
+def report(
+    snap: Snapshot,
+    params: Params = DEFAULT_PARAMS,
+    archive: PredictionArchive | None = None,
+) -> dict[str, Any]:
+    weeks = build_weeks(snap, archive)
     if not weeks:
         return {"weeks": [], "models": []}
     models = [{"key": key, "name": name, **evaluate(weeks, p)} for key, (name, p) in BASELINES.items()]
@@ -245,56 +275,56 @@ def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
     with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
     models.append({"key": "points_trend", "name": "Modellen med poängtrend", **evaluate(weeks, with_points)})
     models.append({"key": "current", "name": "Modellen som används", **evaluate(weeks, params)})
-    return {
+    result: dict[str, Any] = {
         "weeks": [w.number for w in weeks],
+        "archived_price_weeks": [w.number for w in weeks if w.archived_prices],
         "models": models,
         "params": asdict(params),
     }
+    if archive:
+        archived_weeks, archived = evaluate_archived(snap, archive)
+        if archived:
+            result["archived"] = {"weeks": archived_weeks, "name": "Sparade prognoser vid deadline", **archived}
+    return result
 
 
-def tune(snap: Snapshot) -> tuple[Params, dict[str, Any]]:
+PRIOR_GRID = (2.0, 4.0, 6.0)
+PRIOR_GRID_WITH_ARCHIVED_PRICES = (2.0, 4.0, 6.0, 8.0, 12.0)
+
+
+def grid_search(
+    weeks: list[Week], prior_grid: tuple[float, ...] = PRIOR_GRID, base: Params = DEFAULT_PARAMS
+) -> tuple[Params, dict[str, Any]]:
     """Grovt rutnät i två steg: välj parametrar med lägst medelfel. Medvetet grovt för att
-    inte överanpassa till ett fåtal veckor. Steg 1 söker grundvikterna med trenden som den är
-    i DEFAULT_PARAMS, steg 2 söker trendvikterna med steg 1:s bästa grund."""
-    weeks = build_weeks(snap)
-    trend_fixed = {
-        k: getattr(DEFAULT_PARAMS, k)
-        for k in (
-            "recent_play_weight",
-            "play_half_life",
-            "points_trend_weight",
-            "pdo_weight",
-            "category_model",
-            "stable_shrink",
-            "scoring_shrink",
-        )
-    }
+    inte överanpassa till ett fåtal veckor.
+
+    Alla kandidater byggs från `base` med replace(), så vikter som inte söks behåller sina
+    värden. Annars skulle t.ex. kategorimodellen och istidstrenden tyst stängas av.
+    Steg 1 söker grundvikterna, steg 2 trendvikterna med steg 1:s bästa grund. Kategori-
+    modellen och poängtrenden söks inte: de är val som backtesten redan har avgjort.
+    """
     best: tuple[float, Params, dict[str, Any]] | None = None
     for ps, fw, ow, gw, ha in itertools.product(
-        (2.0, 4.0, 8.0),  # prior_strength
-        (0.0, 0.2, 0.35, 0.5),  # form_weight
+        prior_grid,
+        (0.0, 0.1, 0.2, 0.35, 0.5),  # form_weight
         (0.0, 0.25, 0.5, 0.75),  # opponent_weight
-        (0.0, 0.25, 0.5, 0.75),  # gk_opponent_weight
+        (0.0, 0.25, 0.5),  # gk_opponent_weight
         (0.0, 0.03, 0.06),  # home_advantage
     ):
-        params = Params(
-            prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha, **trend_fixed
+        params = replace(
+            base, prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha
         )
         result = evaluate(weeks, params)
         if best is None or result["mae"] < best[0]:
             best = (result["mae"], params, result)
     assert best is not None
-    base = best[1]
-    for rw, hl, tw, ks, kc in itertools.product(
-        (0.0, 0.5, 1.0),  # recent_play_weight
-        (1.0, 2.0),  # play_half_life
-        (0.0, 0.3),  # points_trend_weight
-        (0.5, 2.0),  # stable_shrink
+    stage1 = best[1]
+    for rw, tw, kc in itertools.product(
+        (0.5, 1.0),  # recent_play_weight
+        (0.5, 1.0),  # toi_trend_weight
         (5.0, 10.0, 20.0),  # scoring_shrink
     ):
-        params = replace(
-            base, recent_play_weight=rw, play_half_life=hl, points_trend_weight=tw, stable_shrink=ks, scoring_shrink=kc
-        )
+        params = replace(stage1, recent_play_weight=rw, toi_trend_weight=tw, scoring_shrink=kc)
         result = evaluate(weeks, params)
         if result["mae"] < best[0]:
             best = (result["mae"], params, result)
@@ -308,14 +338,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest av xP-modellen")
     parser.add_argument("--tune", action="store_true", help="Sök bästa parametrar i ett grovt rutnät")
     args = parser.parse_args()
-    snap = DataStore(Path(get_settings().data_dir)).snapshot
-    result = report(snap)
+    data_dir = Path(get_settings().data_dir)
+    snap = DataStore(data_dir).snapshot
+    archive = PredictionArchive(data_dir)
+    result = report(snap, archive=archive)
     print(f"Testveckor: {result['weeks']}")
     print(f"{'Modell':40} {'Medelfel':>9} {'Korr.':>6} {'Elva':>6}")
     for m in result["models"]:
         print(f"{m['name']:40} {m['mae']:>9.2f} {m['correlation']:>6.2f} {m['lineup_efficiency']:>6.0%}")
+    if "archived" in result:
+        a = result["archived"]
+        print(f"{a['name'] + ' ' + str(a['weeks']):40} {a['mae']:>9.2f} {a['correlation']:>6.2f} {a['lineup_efficiency']:>6.0%}")
     if args.tune:
-        params, res = tune(snap)
+        params, res = grid_search(build_weeks(snap, archive), PRIOR_GRID_WITH_ARCHIVED_PRICES)
         print(f"\nBästa parametrar: {params}")
         print(f"  medelfel {res['mae']:.3f}, korrelation {res['correlation']:.3f}, elva {res['lineup_efficiency']:.0%}")
 
