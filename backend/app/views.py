@@ -30,6 +30,7 @@ def player_view(model: Model, p: Player, gameweeks: list[int], detailed: bool = 
         "games_next": model.games_in(p.club, next_gw) if next_gw else 0,
         "xp": {gw: p.xp.get(gw, 0.0) for gw in gameweeks},
         "games": {gw: model.games_in(p.club, gw) for gw in gameweeks},
+        "trend": p.trend.to_dict(),
     }
     if detailed:
         view["breakdown"] = {k: v for k, v in p.breakdown.items() if v}
@@ -63,6 +64,11 @@ def compact_player(model: Model, p: Player, gameweeks: list[int]) -> dict:
         "xp_next": p.xp.get(next_gw, 0.0) if next_gw else 0.0,
         "games_next": model.games_in(p.club, next_gw) if next_gw else 0,
         "xp_horizon": round(p.xp_over(gameweeks), 1),
+        "trend": p.trend.direction,
+        "trend_ppg_delta": round(p.trend.ppg_delta, 1),
+        "recent_play_rate": round(p.trend.recent_play_rate, 2),
+        "toi_min": round(p.trend.recent_toi, 1) if p.trend.recent_toi else None,
+        "toi_min_season": round(p.trend.season_toi, 1) if p.trend.season_toi else None,
     }
 
 

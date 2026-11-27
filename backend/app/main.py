@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 import anthropic
@@ -21,6 +22,7 @@ from .config import get_settings
 from .datastore import DataStore
 from .memory import ProfileMemory, transfer_outcomes
 from .model import Model, build_model
+from .projection import DEFAULT_PARAMS, POINTS_TREND_WEIGHT_OPTION
 from .rules import COACH_CARDS, LINEUP_COMPOSITION, SQUAD_COMPOSITION
 from .squad import (
     TeamState,
@@ -28,6 +30,7 @@ from .squad import (
     apply_transfers,
     best_lineup,
     card_analysis,
+    card_plan,
     evaluate_transfers,
     is_valid,
     transfer_penalty,
@@ -46,15 +49,25 @@ store = DataStore(settings.data_dir)
 teams = TeamStore(settings.data_dir)
 archive = PredictionArchive(settings.data_dir)
 params_store = ParamStore(settings.data_dir)
-_model_cache: dict[str, Any] = {"version": None, "model": None}
+_model_cache: dict[str, Any] = {"version": None, "model": None, "trend_model": None}
 
 
-def current_model() -> Model:
+def current_model(points_trend: bool = False) -> Model:
+    """Modellen som används överallt, med de vikter som gäller just nu (se tuning.py).
+    points_trend=True ger en variant där poängtrenden vägs in, som ett val i den
+    långsiktiga planeraren."""
     version = (store.version, params_store.version)
     if _model_cache["version"] != version or _model_cache["model"] is None:
         _model_cache["model"] = build_model(store.snapshot, params_store.current())
+        _model_cache["trend_model"] = None
         _model_cache["version"] = version
-    model = _model_cache["model"]
+    if points_trend:
+        if _model_cache["trend_model"] is None:
+            params = replace(params_store.current(), points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
+            _model_cache["trend_model"] = build_model(store.snapshot, params)
+        model = _model_cache["trend_model"]
+    else:
+        model = _model_cache["model"]
     if not model.players:
         raise HTTPException(503, "Ingen spelardata ännu – vänta på första uppdateringen eller tryck på 'Uppdatera data'.")
     return model
@@ -295,8 +308,22 @@ def lineup(gameweek: int | None = None, profile: str = Profile) -> dict:
 
 @app.get("/api/cards")
 def cards(weeks: int = 6, profile: str = Profile) -> dict:
-    model = current_model()
-    return {"weeks": card_analysis(model, teams.load(profile), weeks)}
+    model, state = current_model(), teams.load(profile)
+    analysis = card_analysis(model, state, weeks)
+    return {"weeks": analysis, "plan": card_plan(analysis, state.used_cards), "used_cards": state.used_cards}
+
+
+class CardsUsedIn(BaseModel):
+    used_cards: list[str] = Field(default_factory=list)
+
+
+@app.put("/api/cards/used")
+def set_used_cards(body: CardsUsedIn, profile: str = Profile) -> dict:
+    """Markera vilka coachkort som är förbrukade utan att röra resten av laget."""
+    state = teams.load(profile)
+    state.used_cards = [c for c in dict.fromkeys(body.used_cards) if c in COACH_CARDS]
+    teams.save(profile, state)
+    return _team_response(current_model(), state)
 
 
 # ---------------------------------------------------------------- byten
@@ -313,6 +340,15 @@ class SuggestIn(BaseModel):
     horizon: int = Field(3, ge=1, le=10)
     max_transfers: int = Field(2, ge=1, le=5)
     free_card: bool = False
+    keep: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+
+
+class PlanIn(BaseModel):
+    weeks: int = Field(4, ge=2, le=8)
+    max_per_week: int = Field(2, ge=1, le=4)
+    allow_hits: bool = True
+    points_trend: bool = False
     keep: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
 
@@ -355,6 +391,31 @@ async def transfers_suggest(body: SuggestIn, profile: str = Profile) -> dict:
         optimizer.suggest, model, state, body.horizon, body.max_transfers, body.free_card, set(body.keep), set(body.avoid)
     )
     return {"options": options}
+
+
+@app.post("/api/transfers/plan")
+async def transfers_plan(body: PlanIn, profile: str = Profile) -> dict:
+    """Byteskedja över flera veckor: när det lönar sig att byta, vänta eller ta avdrag."""
+    model, state = current_model(body.points_trend), teams.load(profile)
+    if not state.player_ids:
+        raise HTTPException(400, "Lägg in ditt lag först.")
+    result = await asyncio.to_thread(
+        optimizer.plan,
+        model,
+        state,
+        body.weeks,
+        body.max_per_week,
+        body.allow_hits,
+        set(body.keep),
+        set(body.avoid),
+    )
+    if not result:
+        raise HTTPException(400, "Hittade ingen giltig plan.")
+    # Trenden för de spelare som berörs, så att frontend kan visa varför
+    touched = {pid for w in result["weeks"] for pid in w["out"] + w["in"]}
+    result["trends"] = {pid: model.players[pid].trend.to_dict() for pid in touched}
+    result["points_trend"] = body.points_trend
+    return result
 
 
 @app.post("/api/transfers/build")

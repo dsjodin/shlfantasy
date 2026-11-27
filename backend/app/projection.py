@@ -15,6 +15,16 @@ class Params:
     gk_opponent_weight: float = 0.0  # målvakter: effekt av motståndarens gjorda mål
     home_advantage: float = 0.0  # +x hemma, −x borta
     team_prior_games: float = 6.0  # krympning av lagstyrka mot ligasnittet
+    recent_play_weight: float = 0.0  # 0 = säsongens speltidsandel, 1 = senaste veckornas
+    play_half_life: float = 1.5  # veckor, för speltidstrenden
+    points_trend_weight: float = 0.0  # hur mycket poängtrenden (senaste veckorna mot säsongen) väger
+    pdo_weight: float = 0.0  # andel av plus/minus-poängen som antas vara tur och dras bort (utespelare)
+    # Kategorimodellen (utespelare): varje poängkategori krymps mot positionens snitt för sig.
+    # Talet är antal "låtsasmatcher" med positionssnittet. Lågt = spelarens egen siffra litas på.
+    category_model: bool = False
+    stable_shrink: float = 0.5  # istid, tacklingar, blockerade skott, tekningar, skott
+    scoring_shrink: float = 10.0  # mål och assist
+    toi_trend_weight: float = 0.0  # hur mycket ändrad istid (senaste veckorna mot säsongen) slår igenom
 
 
 # Valda med backtest mot matchvecka 2–5 säsongen 2026/27 (python -m app.backtest --tune).
@@ -22,13 +32,80 @@ class Params:
 # pris som redan påverkats av testveckorna. Därför en försiktigare mellanväg för priset.
 # Motstånd och hemmaplan förbättrade i 3 av 4 veckor även i varianter utan pris.
 # Motståndseffekten för målvakter gav ingenting och är avstängd.
+# Speltidstrend, poängtrend, PDO-korrigering och kategorimodell testades mot matchvecka 2–9 (se
+# trend.py och README). Alla utom poängtrenden förbättrade.
 DEFAULT_PARAMS = Params(
     prior_strength=6.0,
     form_weight=0.1,
     opponent_weight=0.5,
     gk_opponent_weight=0.0,
     home_advantage=0.06,
+    recent_play_weight=1.0,
+    play_half_life=1.0,
+    points_trend_weight=0.0,
+    # Med kategorimodellen ersätts plus/minus av positionens snitt, så PDO-korrigeringen behövs
+    # inte. Utan kategorimodellen var pdo_weight=1,0 bäst.
+    pdo_weight=0.0,
+    category_model=True,
+    stable_shrink=0.5,
+    scoring_shrink=10.0,
+    # Istidstrend från matchrapporterna: bättre eller lika i alla testveckor (README).
+    toi_trend_weight=1.0,
 )
+
+# Poängkategorier för utespelare, grupperade efter hur väl de upprepar sig från vecka till vecka
+# (korrelation mellan udda och jämna veckor, matchvecka 1–9 2026/27): istid 0,87, tacklingar och
+# blockerade skott runt 0,57, skott 0,46, mål och assist 0,29, utvisningar 0,11, plus/minus 0,05,
+# matchavgörande mål 0,04. Den sista gruppen ersätts helt av positionens snitt.
+STABLE_CATEGORIES = (
+    "time_on_ice_points",
+    "hits_points",
+    "blocked_shots_points",
+    "faceoffs_won_points",
+    "shots_on_goal_points",
+)
+SCORING_CATEGORIES = ("goals_points", "assists_points", "shorthanded_goals_points")
+NOISE_CATEGORIES = ("plus_minus_points", "game_winning_goals_points", "penalty_minutes_points", "other_points")
+SKATER_CATEGORIES = STABLE_CATEGORIES + SCORING_CATEGORIES + NOISE_CATEGORIES
+
+
+def category_means(rows: Iterable[tuple[str, dict[str, int], int]]) -> dict[str, dict[str, float]]:
+    """Positionens snitt per kategori och spelad match. rows = (position, kategorier, matcher)."""
+    totals: dict[str, dict[str, float]] = {}
+    games: dict[str, int] = {}
+    for pos, cats, gp in rows:
+        if pos == "GK" or not gp:
+            continue
+        t = totals.setdefault(pos, dict.fromkeys(SKATER_CATEGORIES, 0.0))
+        for c in SKATER_CATEGORIES:
+            t[c] += cats.get(c, 0)
+        games[pos] = games.get(pos, 0) + gp
+    return {pos: {c: v / games[pos] for c, v in t.items()} for pos, t in totals.items()}
+
+
+def categories_complete(cats: dict[str, int], total_points: int) -> bool:
+    """Kategorimodellen används bara när fördelningen går ihop med totalen. Annars (t.ex. om
+    kolumnerna saknas i exporten) skulle spelaren få 0 poäng."""
+    return abs(sum(cats.get(c, 0) for c in SKATER_CATEGORIES) - total_points) <= 1
+
+
+def category_ppg(cats: dict[str, int], games: int, means: dict[str, float], params: Params) -> float:
+    """Poäng per match där varje kategori krymps för sig: istid och andra stabila kategorier
+    nästan inte alls, mål och assist hårt, och tur-kategorierna ersätts av positionens snitt."""
+    total = 0.0
+    for group, k in ((STABLE_CATEGORIES, params.stable_shrink), (SCORING_CATEGORIES, params.scoring_shrink)):
+        for c in group:
+            total += (cats.get(c, 0) + k * means.get(c, 0.0)) / (games + k)
+    total += sum(means.get(c, 0.0) for c in NOISE_CATEGORIES)
+    return total
+
+
+# Gränser för istidstrenden, så att en enstaka konstig matchrapport inte slår för hårt
+TOI_RATIO_BOUNDS = (0.5, 1.5)
+
+# Används när man väljer att väga in poängtrenden i den långsiktiga planeraren. Backtesten
+# säger att det gör prognosen marginellt sämre, så vikten hålls låg.
+POINTS_TREND_WEIGHT_OPTION = 0.3
 
 
 @dataclass(frozen=True)
@@ -79,8 +156,24 @@ def expected_per_game(
     team_games: int,
     prior: tuple[float, float],
     params: Params,
+    recent_play: float | None = None,
+    ppg_delta: float = 0.0,
+    pm_per_game: float = 0.0,
+    toi_ratio: float | None = None,
 ) -> tuple[float, float]:
-    """Förväntade poäng per lagmatch och speltidsandel."""
+    """Förväntade poäng per lagmatch och speltidsandel.
+
+    recent_play är speltidsandelen de senaste veckorna (se trend.py) och ppg_delta
+    poängtrenden. Utelämnas de räknas bara säsongen.
+
+    pm_per_game är plus/minus-poäng per spelad match. Plus/minus styrs till stor del av lagets
+    skott- och räddningsprocent när spelaren är på isen (PDO), som brukar jämna ut sig. En
+    spelare med mycket plus/minus-poäng har därför ofta haft tur, och en del av de poängen
+    räknas bort. Gäller inte målvakter (de får inga plus/minus-poäng).
+
+    toi_ratio är istiden senaste veckorna delat med säsongens (utespelare). Ändrad istid
+    betyder ändrad roll, och det slår igenom på alla poäng.
+    """
     intercept, slope = prior
     prior_ppg = max(intercept + slope * price, 0.5)
     gp = games_played
@@ -89,8 +182,17 @@ def expected_per_game(
         return quality, 1.0
     # Lätt krympning så att en enstaka missad match inte slår för hårt
     play_rate = min(1.0, (gp + 0.5) / (team_games + 0.5))
+    if recent_play is not None:
+        play_rate = (1 - params.recent_play_weight) * play_rate + params.recent_play_weight * recent_play
     base = quality * play_rate
-    return (1 - params.form_weight) * base + params.form_weight * form, play_rate
+    per_game = (1 - params.form_weight) * base + params.form_weight * form
+    per_game += params.points_trend_weight * ppg_delta * play_rate
+    # Samma andel som spelarens egen statistik väger i krympningen ovan
+    per_game -= params.pdo_weight * pm_per_game * gp / (gp + params.prior_strength) * play_rate
+    if toi_ratio is not None and params.toi_trend_weight:
+        ratio = min(max(toi_ratio, TOI_RATIO_BOUNDS[0]), TOI_RATIO_BOUNDS[1])
+        per_game *= 1 + params.toi_trend_weight * (ratio - 1)
+    return max(per_game, 0.0), play_rate
 
 
 def game_multiplier(

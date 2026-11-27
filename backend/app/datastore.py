@@ -32,12 +32,14 @@ class Snapshot:
     gameweeks: list[dict[str, Any]] = field(default_factory=list)
     games: list[dict[str, Any]] = field(default_factory=list)
     teams: list[dict[str, str]] = field(default_factory=list)
-    # {gameweek: {player_id: {"games": n, "points": p}}}
+    # {gameweek: {player_id: {"games": n, "points": p, "pm": plus/minus-poäng, "cats": {kategori: poäng}}}}
     gameweek_points: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     final_gameweeks: list[str] = field(default_factory=list)  # avslutade och korrigerade
     # {athlete_uuid: {"player_id": ..., "birth_date": ...}}
     athletes: dict[str, dict[str, str]] = field(default_factory=dict)
     athletes_fetched_at: str | None = None
+    # Istid per spelad match från shl.se:s matchrapporter: {game_id: {player_id: sekunder}}
+    boxscores: dict[str, dict[str, int]] = field(default_factory=dict)
     fetched_at: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -97,6 +99,8 @@ class DataStore:
                     snap.errors.append(f"Matchschema: {exc!r}")
                     log.exception("Kunde inte hämta matchschema")
 
+                await self._refresh_boxscores(client, snap)
+
                 if include_birthdates is None:
                     include_birthdates = _is_stale(snap.athletes_fetched_at, BIRTHDATE_REFRESH_DAYS)
                 if include_birthdates and snap.teams:
@@ -125,7 +129,10 @@ class DataStore:
             # Avslutade veckor hämtas om en gång (för korrigeringar), pågående varje gång.
             if gw["status"] == "upcoming":
                 continue
-            if key in snap.final_gameweeks and key in snap.gameweek_points:
+            cached = snap.gameweek_points.get(key)
+            # Veckor sparade innan alla fält fanns (plus/minus, kategorier) hämtas om en gång
+            has_all_fields = not cached or "cats" in next(iter(cached.values()))
+            if key in snap.final_gameweeks and cached and has_all_fields:
                 continue
             try:
                 points = await fantasy.fetch_gameweek_points(client, gw["number"])
@@ -133,8 +140,19 @@ class DataStore:
                 snap.errors.append(f"Matchvecka {key}: {exc}")
                 continue
             snap.gameweek_points[key] = points
-            if gw["status"] == "completed" and _days_since(gw["end"]) >= 2:
+            if gw["status"] == "completed" and _days_since(gw["end"]) >= 2 and key not in snap.final_gameweeks:
                 snap.final_gameweeks.append(key)
+
+
+    async def _refresh_boxscores(self, client: httpx.AsyncClient, snap: Snapshot) -> None:
+        """Spelade matcher hämtas en gång. Saknas rapporten görs ett nytt försök nästa gång."""
+        missing = [g["id"] for g in snap.games if g["played"] and g["id"] not in snap.boxscores]
+        if not missing:
+            return
+        reports, failed = await shl.fetch_boxscores(client, missing)
+        snap.boxscores.update(reports)
+        if failed:
+            snap.errors.append(f"Matchrapporter: {len(failed)} av {len(missing)} gick inte att hämta")
 
 
 def _now() -> str:

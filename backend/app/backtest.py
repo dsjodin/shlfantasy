@@ -24,8 +24,21 @@ from typing import Any
 from .archive import PredictionArchive
 from .datastore import Snapshot
 from .model import assign_gameweek
-from .projection import DEFAULT_PARAMS, Params, expected_per_game, game_multiplier, price_priors, team_strength
+from .projection import (
+    DEFAULT_PARAMS,
+    POINTS_TREND_WEIGHT_OPTION,
+    Params,
+    categories_complete,
+    category_means,
+    category_ppg,
+    expected_per_game,
+    game_multiplier,
+    price_priors,
+    team_strength,
+)
 from .rules import LINEUP_COMPOSITION, POSITIONS
+from .trend import WeekStat, plus_minus_per_game, recent_play_rate, toi_by_week, toi_ratio
+from .trend import compute as compute_trend
 
 FORM_TEAM_GAMES = 5
 
@@ -42,6 +55,8 @@ class Row:
     team_games: int
     fixtures: list[tuple[str, bool]]  # (motståndare, hemma) veckan som förutsägs
     actual: int
+    weeks: list[WeekStat]  # spelarens veckor före den som förutsägs
+    cats: dict[str, int]  # poäng per kategori före veckan
 
 
 @dataclass
@@ -55,6 +70,7 @@ class Week:
 def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_week: int = 2) -> list[Week]:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
     games = [{**g, "gameweek": assign_gameweek(g["date"], gameweeks)} for g in snap.games if g["played"]]
+    toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
 
     team_games: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     for g in games:
@@ -107,6 +123,19 @@ def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_we
                     team_games=sum(n for w, n in team_games[club].items() if w < wk),
                     fixtures=fixtures,
                     actual=actual_week[p["id"]]["points"],
+                    cats=_sum_cats(past.values()),
+                    weeks=[
+                        WeekStat(
+                            w,
+                            past.get(w, {}).get("games", 0),
+                            past.get(w, {}).get("points", 0),
+                            n,
+                            past.get(w, {}).get("pm", 0),
+                            *toi.get(p["id"], {}).get(w, (0, 0)),
+                        )
+                        for w, n in sorted(team_games[club].items())
+                        if w < wk
+                    ],
                 )
             )
         played_before = [g for g in games if g["gameweek"] and g["gameweek"] < wk]
@@ -114,19 +143,41 @@ def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_we
     return weeks
 
 
+def _sum_cats(rows) -> dict[str, int]:
+    total: dict[str, int] = defaultdict(int)
+    for r in rows:
+        for c, v in r.get("cats", {}).items():
+            total[c] += v
+    return dict(total)
+
+
 def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
     priors = price_priors([asdict(r) for r in week.rows], POSITIONS)
+    complete = {r.pid for r in week.rows if categories_complete(r.cats, round(r.ppg * r.games_played))}
+    means = category_means((r.position, r.cats, r.games_played) for r in week.rows if r.pid in complete)
     strength = team_strength(week.played_before, params.team_prior_games)
     out = []
     for r in week.rows:
+        trend = compute_trend(r.weeks, params.play_half_life) if params.points_trend_weight else None
+        use_categories = (
+            params.category_model
+            and r.position != "GK"
+            and r.games_played
+            and r.position in means
+            and r.pid in complete
+        )
         per_game, _ = expected_per_game(
             price=r.price,
             games_played=r.games_played,
-            ppg=r.ppg,
+            ppg=category_ppg(r.cats, r.games_played, means[r.position], params) if use_categories else r.ppg,
             form=r.form,
             team_games=r.team_games,
             prior=priors[r.position],
             params=params,
+            recent_play=recent_play_rate(r.weeks, params.play_half_life),
+            ppg_delta=trend.ppg_delta if trend else 0.0,
+            pm_per_game=plus_minus_per_game(r.weeks) if r.position != "GK" else 0.0,
+            toi_ratio=toi_ratio(r.weeks) if r.position != "GK" else None,
         )
         mult = sum(game_multiplier(r.position, opp, home, strength, params) for opp, home in r.fixtures)
         out.append((r, per_game * mult))
@@ -213,6 +264,16 @@ def report(
     models = [{"key": key, "name": name, **evaluate(weeks, p)} for key, (name, p) in BASELINES.items()]
     no_opp = replace(params, opponent_weight=0.0, gk_opponent_weight=0.0, home_advantage=0.0)
     models.append({"key": "basic", "name": "Modellen utan motstånd/hemmaplan", **evaluate(weeks, no_opp)})
+    no_play = replace(params, recent_play_weight=0.0)
+    models.append({"key": "no_play_trend", "name": "Modellen utan speltidstrend", **evaluate(weeks, no_play)})
+    no_cat = replace(params, category_model=False, pdo_weight=1.0)
+    models.append({"key": "no_categories", "name": "Modellen utan kategorivikter (bara PDO)", **evaluate(weeks, no_cat)})
+    no_pdo = replace(params, category_model=False, pdo_weight=0.0)
+    models.append({"key": "no_pdo", "name": "Modellen utan kategorivikter och PDO", **evaluate(weeks, no_pdo)})
+    no_toi = replace(params, toi_trend_weight=0.0)
+    models.append({"key": "no_toi_trend", "name": "Modellen utan istidstrend", **evaluate(weeks, no_toi)})
+    with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
+    models.append({"key": "points_trend", "name": "Modellen med poängtrend", **evaluate(weeks, with_points)})
     models.append({"key": "current", "name": "Modellen som används", **evaluate(weeks, params)})
     result: dict[str, Any] = {
         "weeks": [w.number for w in weeks],
@@ -231,23 +292,42 @@ PRIOR_GRID = (2.0, 4.0, 6.0)
 PRIOR_GRID_WITH_ARCHIVED_PRICES = (2.0, 4.0, 6.0, 8.0, 12.0)
 
 
-def grid_search(weeks: list[Week], prior_grid: tuple[float, ...] = PRIOR_GRID) -> tuple[Params, dict[str, Any]]:
-    """Grovt rutnät: välj parametrar med lägst medelfel. Medvetet grovt för att inte
-    överanpassa till ett fåtal veckor."""
-    grid = itertools.product(
+def grid_search(
+    weeks: list[Week], prior_grid: tuple[float, ...] = PRIOR_GRID, base: Params = DEFAULT_PARAMS
+) -> tuple[Params, dict[str, Any]]:
+    """Grovt rutnät i två steg: välj parametrar med lägst medelfel. Medvetet grovt för att
+    inte överanpassa till ett fåtal veckor.
+
+    Alla kandidater byggs från `base` med replace(), så vikter som inte söks behåller sina
+    värden. Annars skulle t.ex. kategorimodellen och istidstrenden tyst stängas av.
+    Steg 1 söker grundvikterna, steg 2 trendvikterna med steg 1:s bästa grund. Kategori-
+    modellen och poängtrenden söks inte: de är val som backtesten redan har avgjort.
+    """
+    best: tuple[float, Params, dict[str, Any]] | None = None
+    for ps, fw, ow, gw, ha in itertools.product(
         prior_grid,
         (0.0, 0.1, 0.2, 0.35, 0.5),  # form_weight
         (0.0, 0.25, 0.5, 0.75),  # opponent_weight
         (0.0, 0.25, 0.5),  # gk_opponent_weight
         (0.0, 0.03, 0.06),  # home_advantage
-    )
-    best: tuple[float, Params, dict[str, Any]] | None = None
-    for ps, fw, ow, gw, ha in grid:
-        params = Params(prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha)
+    ):
+        params = replace(
+            base, prior_strength=ps, form_weight=fw, opponent_weight=ow, gk_opponent_weight=gw, home_advantage=ha
+        )
         result = evaluate(weeks, params)
         if best is None or result["mae"] < best[0]:
             best = (result["mae"], params, result)
     assert best is not None
+    stage1 = best[1]
+    for rw, tw, kc in itertools.product(
+        (0.5, 1.0),  # recent_play_weight
+        (0.5, 1.0),  # toi_trend_weight
+        (5.0, 10.0, 20.0),  # scoring_shrink
+    ):
+        params = replace(stage1, recent_play_weight=rw, toi_trend_weight=tw, scoring_shrink=kc)
+        result = evaluate(weeks, params)
+        if result["mae"] < best[0]:
+            best = (result["mae"], params, result)
     return best[1], best[2]
 
 

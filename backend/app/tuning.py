@@ -13,7 +13,7 @@ Spärrar mot att modellen anpassar sig efter slumpen:
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,8 +42,10 @@ class ParamStore:
         saved = self._data().get("params")
         if not saved:
             return DEFAULT_PARAMS
+        # Ovanpå standardvikterna: vikter som tillkommit efter att filen sparades får sitt
+        # standardvärde i stället för Params grundvärde (som stänger av funktionen).
         fields = Params.__dataclass_fields__
-        return Params(**{k: v for k, v in saved.items() if k in fields})
+        return replace(DEFAULT_PARAMS, **{k: v for k, v in saved.items() if k in fields})
 
     def log(self) -> list[dict[str, Any]]:
         return self._data().get("log", [])
@@ -73,7 +75,7 @@ class ParamStore:
             train, holdout = weeks[:-HOLDOUT], weeks[-HOLDOUT:]
             all_archived = all(w.archived_prices for w in weeks)
             prior_grid = PRIOR_GRID_WITH_ARCHIVED_PRICES if all_archived else PRIOR_GRID
-            candidate, _ = grid_search(train, prior_grid)
+            candidate, _ = grid_search(train, prior_grid, base=current)
             cur = evaluate(holdout, current)
             cand = evaluate(holdout, candidate)
             improvement = (cur["mae"] - cand["mae"]) / cur["mae"] if cur["mae"] else 0.0

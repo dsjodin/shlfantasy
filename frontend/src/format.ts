@@ -18,3 +18,9 @@ export const STATUS_LABELS: Record<string, string> = {
   injured: "Skadad",
   unavailable: "Borta",
 };
+
+/** Minuter som "13:47". */
+export const minutes = (m: number) => {
+  const total = Math.round(m * 60);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+};

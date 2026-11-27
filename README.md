@@ -8,6 +8,8 @@ Det behövs ingen skrapning av inloggade sidor. Fantasy SHL publicerar en öppen
 
 Appen hämtar allt automatiskt vid start och sedan en gång i timmen. Födelsedatum hämtas om en gång i veckan. Allt sparas i `data/` så att appen fungerar även om källorna ligger nere en stund.
 
+Istiden per spelare och match hämtas från shl.se:s matchrapporter, en gång per spelad match.
+
 Det enda som inte finns öppet är ditt eget lag. Det lägger du in en gång under "Mitt lag" (15 spelare och vad du har kvar i banken). När du sedan gör ett byte här och trycker på "Genomför i mitt lag" uppdateras laget, banken och antalet gratisbyten automatiskt.
 
 ## Flera i familjen
@@ -21,9 +23,10 @@ Profilerna har inget lösenord. Det räcker på hemnätet men betyder att vem so
 - Profiler: ett eget lag per familjemedlem.
 - Mitt lag: trupp, bank, gratisbyten och använda coachkort, med regelkontroll och föreslagen laguttagning (två femmor, målvakt, kapten och assisterande kapten).
 - Byten: välj vem som ska ut och se direkt vad du har att lägga, vilka som är möjliga och modellens bästa ersättare. Kalkylatorn visar bank efter byte, poängavdrag och förväntad poängförändring vecka för vecka. Optimeraren räknar fram bästa kombinationen av 1 till 4 byten, eller ett helt nytt lag med Fria Byten.
-- Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, samt matchschema per lag och vecka.
-- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare.
-- AI-rådgivare: chatt med Claude som har verktyg för att läsa ditt lag, söka spelare, räkna på byten och köra optimeraren. Från bytessidan kan du också låta AI:n granska ett planerat byte.
+- Långsiktig byteskedja: planerar byten vecka för vecka över 2 till 6 veckor. Gratisbyten sparas (max 2) och varje extra byte kostar 10 poäng, så planen avgör om det lönar sig att ta avdrag nu eller vänta på nästa gratisbyte. Särskilt användbart när gratisbytena är slut. Två veckor efter planen räknas också med, så att sena byten måste hålla även efteråt.
+- Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, en kortplan som fördelar de kort du har kvar med högst ett kort per vecka, och matchschema per lag och vecka. Förbrukade kort markeras direkt på sidan.
+- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare, inklusive formtrend (pil uppåt eller nedåt).
+- AI-rådgivare: chatt med Claude som har verktyg för att läsa ditt lag, söka spelare, räkna på byten, köra optimeraren och planera byteskedjor. Från bytessidan kan du också låta AI:n granska ett planerat byte.
 
 ## Så räknas xP (förväntade poäng)
 
@@ -34,6 +37,40 @@ Vikterna är inte gissade utan framtagna med en backtest: för varje redan spela
 Efter matchvecka 2–5 säsongen 2026/27 såg det ut så här: modellen missar i snitt 4,6 poäng per spelare och vecka, och dess bästa elva tog 48 % av poängen som den bästa möjliga elvan i efterhand fick. Säsongssnitt rakt av gav 5,7 respektive 34 %. Motstånd och hemmaplan förbättrade resultatet i tre av fyra veckor. Det säger två saker: modellen är klart bättre än att gå på snittet, och veckopoäng i hockey är så slumpmässiga att ingen modell kommer att träffa enskilda spelare särskilt bra. Värdet ligger i att välja rätt oftare.
 
 Backtesten har en svaghet som bör sägas rakt ut. Fantasy SHL publicerar inte historiska priser, så testet använder dagens pris, som redan har påverkats av de veckor som testas. Det gör att priset ser något klokare ut i efterhand än det var, och därför väger modellen priset lite lägre än vad backtesten själv föreslår.
+
+### Formtrend och PDO
+
+Varje spelare har en formtrend som jämför de senaste veckorna med säsongen, både i poäng per match och i andel av lagets matcher spelaren faktiskt spelat. Båda testades i backtesten mot matchvecka 2–9:
+
+- Speltidstrenden förbättrar prognosen och räknas in i xP. En spelare som petats eller fått en större roll fortsätter oftast så.
+- Poängtrenden gör prognosen något sämre. En het poängperiod håller sällan i sig, så den visas som information men räknas inte in. I den långsiktiga planeraren kan man ändå välja att väga in den.
+- Plus/minus-poängen räknas som tur. De styrs till stor del av lagets skott- och räddningsprocent när spelaren är på isen (det som kallas PDO), och det jämnar ut sig. Spelare med mycket plus/minus-poäng presterade klart sämre än modellen trodde.
+
+### Kategorimodellen
+
+För utespelare räknas poäng per match kategori för kategori, eftersom kategorierna är olika pålitliga. Mätt som korrelation mellan udda och jämna matchveckor (vecka 1–9):
+
+| Kategori | Andel av poängen | Upprepar sig |
+|---|---|---|
+| Istid | 56 % | 0,87 |
+| Tacklingar, blockerade skott | 9 % | 0,56–0,59 |
+| Mål och assist | 36 % | 0,29 |
+| Utvisningar, plus/minus, matchavgörande mål | −4 % | 0,04–0,11 |
+
+Istiden, mer än halva poängen, är alltså nästan helt förutsägbar medan mål och assist till stor del är slump. Därför litar modellen nästan helt på spelarens egen istid, krymper mål och assist hårt mot positionens snitt och ersätter tur-kategorierna helt med snittet. Målvakter räknas som tidigare.
+
+Kategorimodellen förbättrade bästa elvan i sju av åtta veckor. Vinsten är störst tidigt i säsongen, när få matcher gör det viktigast att veta vilka poäng som är slump.
+
+### Matchrapporterna från shl.se
+
+Matchrapporterna har istid, kedja, powerplaymål, powerplayskott och skott per spelare, plus vilken målvakt som startade. Allt testades mot backtesten:
+
+- Istidstrend (minuter per match de senaste två veckorna mot säsongen): bättre eller lika i alla åtta testveckor och bättre i varje vecka från vecka 5. Den räknas in i xP och syns i formtrenden. Mer istid betyder större roll, och det syns innan poängen gör det.
+- Kedja och powerplay: tillförde ingenting utöver modellen. Priset och kategorimodellen fångar rollen redan.
+- Motståndets styrka mätt i skott i stället för mål: bästa elvan svängde kraftigt mellan veckorna och medelfelet blev sämre i fyra veckor. Används inte.
+- Målvakter (startandel, krympning): inget försök förbättrade prognosen. Målvakternas veckopoäng är svåra att förutsäga, och underlaget är litet (17 målvakter).
+
+Sammantaget gick medelfelet från 4,38 till 4,15 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,49 och bästa elvan från 46 % till 54 %.
 
 ## Lär sig systemet?
 

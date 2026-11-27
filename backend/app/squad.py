@@ -333,5 +333,42 @@ def card_analysis(model: Model, state: TeamState, weeks: int = 6) -> list[dict]:
     return result
 
 
+CARD_MIN_GAIN = 1.0  # ett kort som ger mindre än så är inte värt att lägga en vecka på
+
+
+def card_plan(weeks: list[dict], used: list[str], blocked_weeks: set[int] | None = None) -> list[dict]:
+    """Fördelar de kort som finns kvar på veckorna så att den sammanlagda extrapoängen blir
+    störst. Högst ett coachkort per vecka och varje kort en gång, enligt reglerna.
+
+    Utan regeln om ett kort per vecka skulle flera kort ofta hamna på samma vecka (den med
+    flest matcher), så den här planen kan skilja sig från "bästa veckan per kort".
+    blocked_weeks är veckor där ett annat kort redan är planerat (t.ex. Fria Byten).
+    Ett kort vars bästa vecka ger mindre än CARD_MIN_GAIN sparas till senare i säsongen.
+    """
+    blocked = blocked_weeks or set()
+    keys = [
+        k
+        for k in (weeks[0]["cards"] if weeks else {})
+        if k not in used and any((w["cards"][k]["gain"] or 0) >= CARD_MIN_GAIN for w in weeks)
+    ]
+    # Dynamisk programmering över veckorna: tillstånd = vilka kort som redan är lagda
+    best: dict[int, tuple[float, list[tuple[int, str, float]]]] = {0: (0.0, [])}
+    for w in weeks:
+        nxt = dict(best)
+        if w["gameweek"] not in blocked:
+            for mask, (total, picks) in best.items():
+                for i, k in enumerate(keys):
+                    gain = w["cards"][k]["gain"]
+                    if mask & (1 << i) or gain is None or gain < CARD_MIN_GAIN:
+                        continue
+                    cand = (total + gain, picks + [(w["gameweek"], k, gain)])
+                    m = mask | (1 << i)
+                    if m not in nxt or cand[0] > nxt[m][0]:
+                        nxt[m] = cand
+        best = nxt
+    _, picks = max(best.values(), key=lambda v: v[0])
+    return [{"gameweek": gw, "card": k, "name": COACH_CARDS[k], "gain": _r(g)} for gw, k, g in sorted(picks)]
+
+
 def _name(model: Model, pid: str) -> str:
     return model.players[pid].name if pid in model.players else pid

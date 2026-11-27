@@ -83,12 +83,16 @@ def parse_gameweeks(text: str) -> list[dict[str, Any]]:
 
 
 def parse_gameweek_points(text: str) -> dict[str, dict[str, Any]]:
-    """Returnerar {player_id: {"games": n, "points": p}} för en matchvecka."""
+    """Returnerar {player_id: {"games": n, "points": p, "pm": plus/minus-poäng, "cats": {kategori: poäng}}}
+    för en matchvecka. cats innehåller bara kategorier som inte är noll."""
     result = {}
     for row in parse_csv(text):
+        cats = {c: v for c in POINT_COLUMNS if (v := _num(row.get(c), int))}
         result[row["player_shl_id"].strip()] = {
             "games": _num(row.get("games_played"), int),
             "points": _num(row.get("total_fantasy_points"), int),
+            "pm": _num(row.get("plus_minus_points"), int),
+            "cats": cats,
         }
     return result
 

@@ -3,10 +3,17 @@ import { api } from "../api";
 import { useAiConversation } from "../components/AiStream";
 import { AiTurns } from "../components/AiTurns";
 import { PlayerPicker } from "../components/PlayerPicker";
-import { PlayerRow } from "../components/PlayerBits";
+import { PlayerRow, TrendArrow } from "../components/PlayerBits";
 import { mkr, num, signed } from "../format";
 import { useApp } from "../state";
-import { POSITIONS, POSITION_NAMES, type Alternative, type Evaluation, type Suggestion } from "../types";
+import {
+  POSITIONS,
+  POSITION_NAMES,
+  type Alternative,
+  type Evaluation,
+  type Suggestion,
+  type TransferPlan,
+} from "../types";
 
 interface Pair {
   out: string;
@@ -264,6 +271,7 @@ export function TransfersPage() {
             </section>
           )}
 
+          <PlanPanel onLoad={(out, inn) => loadSuggestion({ out, in: inn } as Suggestion)} />
           <SuggestPanel onLoad={loadSuggestion} />
         </div>
       </div>
@@ -397,6 +405,154 @@ function SuggestPanel({ onLoad }: { onLoad: (s: Suggestion) => void }) {
       ))}
       {team && team.free_transfers === 0 && !freeCard && (
         <p className="hint">Du har inga gratis byten – varje byte kostar 10 poäng.</p>
+      )}
+    </section>
+  );
+}
+
+function PlanPanel({ onLoad }: { onLoad: (out: string[], inn: string[]) => void }) {
+  const { players, team } = useApp();
+  const noFree = (team?.free_transfers ?? 0) === 0;
+  const [weeks, setWeeks] = useState(4);
+  const [maxPerWeek, setMaxPerWeek] = useState(2);
+  const [allowHits, setAllowHits] = useState(true);
+  const [pointsTrend, setPointsTrend] = useState(false);
+  const [plan, setPlan] = useState<TransferPlan | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setPlan(await api.plan({ weeks, max_per_week: maxPerWeek, allow_hits: allowHits, points_trend: pointsTrend }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const first = plan?.weeks[0];
+  const tail = plan ? plan.weeks.filter((w) => !w.transfer_week) : [];
+
+  return (
+    <section className={`card ${noFree ? "highlight" : ""}`}>
+      <h2>Långsiktig byteskedja</h2>
+      <p className="hint">
+        Planerar byten vecka för vecka. Gratisbyten sparas (max 2) och varje extra byte kostar 10 poäng, så planen
+        avgör själv om det lönar sig att ta ett avdrag nu eller vänta på nästa gratisbyte. Två veckor efter planen
+        räknas också med, så att sena byten måste hålla även efteråt.
+        {noFree && <strong> Du har inga gratisbyten kvar, det är precis här planen gör mest nytta.</strong>}
+      </p>
+      <div className="toolbar">
+        <label>
+          Veckor{" "}
+          <select value={weeks} onChange={(e) => setWeeks(Number(e.target.value))}>
+            {[2, 3, 4, 5, 6].map((n) => (
+              <option key={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Max byten/vecka{" "}
+          <select value={maxPerWeek} onChange={(e) => setMaxPerWeek(Number(e.target.value))}>
+            {[1, 2, 3].map((n) => (
+              <option key={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+        <label className="check" title="Tillåt byten utöver gratisbytena (−10 poäng styck)">
+          <input type="checkbox" checked={allowHits} onChange={(e) => setAllowHits(e.target.checked)} /> Tillåt −10
+        </label>
+        <label
+          className="check"
+          title="Lägger till en del av skillnaden mellan senaste veckornas poäng per match och säsongssnittet. Backtesten visar att det inte förbättrar prognosen, så det är avstängt som standard."
+        >
+          <input type="checkbox" checked={pointsTrend} onChange={(e) => setPointsTrend(e.target.checked)} /> Väg in
+          poängformen
+        </label>
+        <button className="primary" onClick={run} disabled={busy}>
+          {busy ? "Planerar…" : "Planera"}
+        </button>
+      </div>
+      {pointsTrend && (
+        <p className="hint">
+          Poängformen vägs in. Speltidstrenden finns alltid med i xP. Poängformen gör prognosen marginellt sämre i
+          backtesten (se Spelare → ”Hur träffsäker är xP?”), så se det som ett sätt att testa en magkänsla.
+        </p>
+      )}
+      {error && <div className="alert error">{error}</div>}
+      {plan && (
+        <>
+          <div className={`verdict ${plan.net_gain > 0 ? "good" : plan.transfers === 0 ? "" : "bad"}`}>
+            {plan.transfers === 0 ? (
+              <strong>Behåll laget – inga byten lönar sig under perioden</strong>
+            ) : (
+              <strong>{signed(plan.net_gain)} xP netto</strong>
+            )}
+            <small>
+              {plan.transfers} byten · {plan.penalty ? `−${plan.penalty} i avdrag` : "inga avdrag"} · v.
+              {plan.gameweeks[0]}–{plan.gameweeks[plan.gameweeks.length - 1]} · {num(plan.xp_hold)} →{" "}
+              {num(plan.xp_plan)} xP
+            </small>
+          </div>
+          <div className="plan">
+            {plan.weeks
+              .filter((w) => w.transfer_week)
+              .map((w) => (
+                <div key={w.gameweek} className="plan-week">
+                  <div className="plan-week-head">
+                    <strong>v.{w.gameweek}</strong>
+                    <span className="hint">
+                      {w.free_before} gratis
+                      {w.penalty ? <span className="bad"> · −{w.penalty}</span> : null} · bank {mkr(w.bank_after)} ·{" "}
+                      {num(w.expected_points)} xP <small>(utan byten {num(w.hold_points)})</small>
+                    </span>
+                  </div>
+                  {w.out.length === 0 ? (
+                    <p className="hint">
+                      Inga byten – {w.free_before && w.free_before > 0 ? "spara gratisbytet" : "vänta på nästa gratisbyte"}.
+                    </p>
+                  ) : (
+                    w.out.map((o, i) => {
+                      const inId = w.in[i];
+                      return (
+                        <div key={o} className="swap">
+                          <span className="out-name">
+                            {players[o]?.name} <TrendArrow trend={plan.trends[o]} />
+                          </span>
+                          <span className="arrow">→</span>
+                          <span className="in-name">
+                            {players[inId]?.name} <TrendArrow trend={plan.trends[inId]} />{" "}
+                            <small>
+                              {players[inId]?.club} · {mkr(players[inId]?.price ?? 0)}
+                            </small>
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ))}
+            {tail.length > 0 && (
+              <p className="hint">
+                Efter planen: {tail.map((w) => `v.${w.gameweek} ${num(w.expected_points)} xP (utan byten ${num(w.hold_points)})`).join(" · ")}
+              </p>
+            )}
+          </div>
+          {first && first.out.length > 0 && (
+            <div className="toolbar">
+              <button className="small" onClick={() => onLoad(first.out, first.in)}>
+                Ladda veckans byten i kalkylatorn
+              </button>
+            </div>
+          )}
+          <p className="hint">
+            Bara veckans byten behöver göras nu. Kör planen igen nästa vecka, då har ny data kommit in och planen kan
+            ändras. Planen räknar med dagens priser.
+          </p>
+        </>
       )}
     </section>
   );

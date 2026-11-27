@@ -6,7 +6,11 @@ Modellen är medvetet enkel och transparent:
    förväntningsvärde för positionen när antalet matcher är litet. Fantasy SHL prissätter
    spelare efter förväntad poäng per match, så priset är en bra "prior".
 2. Speltid = andel av lagets matcher spelaren har spelat (viktigt för t.ex. målvakter).
-3. Formen (snitt senaste fem lagmatcher, inkl. nollor) vägs in för att fånga trender.
+   Speltidsandelen räknas med senaste veckorna tyngst (speltidstrend, se trend.py).
+3. Formen (snitt senaste fem lagmatcher, inkl. nollor) vägs in lätt.
+   För utespelare räknas poäng per match kategori för kategori (projection.category_ppg):
+   istid litas på nästan helt, mål och assist krymps hårt, och plus/minus, utvisningar och
+   matchavgörande mål ersätts av positionens snitt eftersom de mest är tur.
 4. xP för en vecka = summan över lagets matcher den veckan av förväntat per lagmatch,
    justerat för motståndarens styrka, hemmaplan och skada/frånvaro.
 
@@ -21,8 +25,21 @@ from datetime import date
 from typing import Any
 
 from .datastore import Snapshot
-from .projection import DEFAULT_PARAMS, Params, TeamStrength, expected_per_game, game_multiplier, price_priors, team_strength
+from .projection import (
+    DEFAULT_PARAMS,
+    Params,
+    TeamStrength,
+    categories_complete,
+    category_means,
+    category_ppg,
+    expected_per_game,
+    game_multiplier,
+    price_priors,
+    team_strength,
+)
 from .rules import POSITIONS
+from .trend import FLAT, Trend, WeekStat, recent_play_rate, toi_by_week, toi_ratio
+from .trend import compute as compute_trend
 
 # Multiplikator per vecka framåt (0 = nästa vecka) beroende på status
 STATUS_MULTIPLIERS = {
@@ -51,6 +68,7 @@ class Player:
     xp_per_game: float = 0.0
     xp: dict[int, float] = field(default_factory=dict)
     history: list[dict[str, int]] = field(default_factory=list)
+    trend: Trend = FLAT
 
     def age_on(self, day: date) -> int | None:
         if not self.birth_date:
@@ -111,11 +129,30 @@ def assign_gameweek(day: str, gameweeks: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _week_stats(
+    history: list[dict[str, int]], team_games: dict[int, int], toi: dict[int, tuple[int, int]] | None = None
+) -> list[WeekStat]:
+    by_week = {h["gameweek"]: h for h in history}
+    toi = toi or {}
+    return [
+        WeekStat(
+            gw,
+            by_week.get(gw, {}).get("games", 0),
+            by_week.get(gw, {}).get("points", 0),
+            n,
+            by_week.get(gw, {}).get("pm", 0),
+            *toi.get(gw, (0, 0)),
+        )
+        for gw, n in sorted(team_games.items())
+    ]
+
+
 def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
 
     fixtures: dict[str, dict[int, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     team_games_played: dict[str, int] = defaultdict(int)
+    team_games_by_week: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     games = []
     for raw_game in snap.games:
         gw = assign_gameweek(raw_game["date"], gameweeks)
@@ -126,6 +163,9 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             team_games_played[g["away"]] += 1
         if gw is None:
             continue
+        if g["played"]:
+            team_games_by_week[g["home"]][gw] += 1
+            team_games_by_week[g["away"]][gw] += 1
         fixtures[g["home"]][gw].append({"opponent": g["away"], "home": True, "date": g["date"], "played": g["played"]})
         fixtures[g["away"]][gw].append({"opponent": g["home"], "home": False, "date": g["date"], "played": g["played"]})
 
@@ -135,6 +175,12 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             history[pid].append({"gameweek": int(key), **row})
 
     priors = price_priors(snap.players, POSITIONS)
+    toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
+    cat_means = category_means(
+        (r["position"], r["breakdown"], r["games_played"])
+        for r in snap.players
+        if categories_complete(r["breakdown"], r["total_points"])
+    )
     strength = team_strength((g for g in games if g["played"]), params.team_prior_games)
     birthdates = snap.birthdates
     upcoming = [gw["number"] for gw in gameweeks if gw["status"] == "upcoming"]
@@ -159,14 +205,38 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             birth_date=birthdates.get(raw["id"]),
             history=history.get(raw["id"], []),
         )
+        weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}), toi.get(p.id))
+        p.trend = compute_trend(weeks, params.play_half_life)
+        # För skadade och frånvarande sköter statusen nedtrappningen. Speltidstrenden skulle
+        # annars räkna frånvaron en gång till.
+        # Saknas veckohistorik (t.ex. en veckofil som inte gick att hämta) skulle det se ut
+        # som att spelaren inte spelat. Använd bara trenden när historiken går ihop.
+        history_complete = sum(w.games for w in weeks) >= p.games_played - 1
+        recent_play = (
+            recent_play_rate(weeks, params.play_half_life) if p.status == "active" and history_complete else None
+        )
+        use_categories = (
+            params.category_model
+            and p.position != "GK"
+            and p.games_played
+            and p.position in cat_means
+            and categories_complete(p.breakdown, p.total_points)
+        )
+        ppg = category_ppg(p.breakdown, p.games_played, cat_means[p.position], params) if use_categories else p.ppg
         per_game, p.play_rate = expected_per_game(
             price=p.price,
             games_played=p.games_played,
-            ppg=p.ppg,
+            ppg=ppg,
             form=p.form,
             team_games=team_games_played.get(p.club, 0),
             prior=priors[p.position],
             params=params,
+            recent_play=recent_play,
+            ppg_delta=p.trend.ppg_delta,
+            pm_per_game=p.breakdown.get("plus_minus_points", 0) / p.games_played
+            if p.games_played and p.position != "GK"
+            else 0.0,
+            toi_ratio=toi_ratio(weeks) if p.position != "GK" else None,
         )
         p.xp_per_game = round(per_game, 2)
 

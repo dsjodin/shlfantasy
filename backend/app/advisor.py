@@ -25,6 +25,7 @@ from .squad import (
     alternatives,
     best_lineup,
     card_analysis,
+    card_plan,
     evaluate_transfers,
     validate_squad,
 )
@@ -49,8 +50,17 @@ Så arbetar du:
   och förklara varför (fler matcher, bättre form, billigare så att budget frigörs, skaderisk, osv.).
   Om användarens val är bra, bekräfta det och säg varför.
 - Ta hänsyn till poängavdraget (−10 p) för byten utöver de gratis, och till att sparade byten har ett värde.
+- När användaren saknar gratisbyten eller frågar långsiktigt: använd plan_transfers för att se om ett
+  avdrag lönar sig nu eller om det är bättre att vänta en vecka.
+- Bara ett coachkort får spelas per vecka. Använd planen från coach_cards och föreslå aldrig ett kort
+  som redan är använt.
 - xP (förväntade poäng) kommer från en enkel statistisk modell: poäng per match krympt mot prisets
-  förväntan, andel spelade lagmatcher, form och antal matcher per vecka. Den vet inget om kedjor,
+  förväntan, andel spelade lagmatcher (senaste veckorna tyngst), form och antal matcher per vecka.
+  För utespelare räknas varje poängkategori för sig: istid (stabil) litas på, mål och assist krymps
+  hårt, och plus/minus, utvisningar och matchavgörande mål räknas som tur (PDO). Ändrad istid de
+  senaste två veckorna (från shl.se:s matchrapporter) justerar xP, eftersom den visar ändrad roll. Fältet trend visar om formen pekar
+  upp eller ner. Backtesten visar att en het poängperiod oftast inte håller i sig, medan ändrad
+  speltid gör det. Lyft trenden som information, men överdriv den inte. Den vet inget om kedjor,
   powerplay-roller, målvaktsrotation eller nyheter. Lyft sådana osäkerheter när de spelar roll och
   föreslå vad användaren bör kontrollera.
 - Positioner: GK = målvakt, D = back, C = center, F = forward (ytter). Statusen "unavailable" betyder
@@ -150,6 +160,14 @@ class ForgetInput(BaseModel):
     note_id: str
 
 
+class PlanTransfersInput(BaseModel):
+    weeks: int = Field(4, ge=2, le=8)
+    max_per_week: int = Field(2, ge=1, le=4)
+    allow_hits: bool = True
+    keep: list[str] = []
+    avoid: list[str] = []
+
+
 def _schema(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema(by_alias=True)
     schema.pop("title", None)
@@ -204,7 +222,8 @@ TOOL_SPECS: list[tuple[str, str, type[BaseModel]]] = [
     (
         "coach_cards",
         "Beräknar förväntad extra poäng för varje coachkort (Toppa Laget, Anfall, Försvar, Juniorer, Veteraner) "
-        "per kommande matchvecka med användarens nuvarande trupp, och vilka kort som redan är använda.",
+        "per kommande matchvecka med användarens nuvarande trupp, vilka kort som redan är använda, och en "
+        "kortplan (plan) där de kvarvarande korten är fördelade med högst ett kort per vecka.",
         CoachCardsInput,
     ),
     (
@@ -222,6 +241,13 @@ TOOL_SPECS: list[tuple[str, str, type[BaseModel]]] = [
         "forget",
         "Tar bort en sparad anteckning (id från get_memory).",
         ForgetInput,
+    ),
+    (
+        "plan_transfers",
+        "Planerar en byteskedja över flera veckor: vilka byten som ska göras inför varje vecka, med gratisbyten "
+        "som sparas (max 2) och −10 per extra byte. Svarar på om det lönar sig att ta avdrag nu eller vänta. "
+        "Använd när användaren saknar gratisbyten eller vill tänka långsiktigt. Kan ta upp till en halv minut.",
+        PlanTransfersInput,
     ),
 ]
 
@@ -243,6 +269,7 @@ TOOL_LABELS = {
     "get_memory": "Läser minnet",
     "remember": "Sparar i minnet",
     "forget": "Glömmer anteckning",
+    "plan_transfers": "Planerar byteskedja",
 }
 
 
@@ -393,7 +420,39 @@ class Toolbox:
 
     def tool_coach_cards(self, a: CoachCardsInput) -> dict:
         self._require_team()
-        return {"used_cards": self.state.used_cards, "weeks": card_analysis(self.model, self.state, a.weeks)}
+        weeks = card_analysis(self.model, self.state, a.weeks)
+        return {
+            "used_cards": self.state.used_cards,
+            "weeks": weeks,
+            "plan": card_plan(weeks, self.state.used_cards),
+            "note": "Bara ett coachkort per vecka. plan fördelar de kvarvarande korten därefter.",
+        }
+
+    def tool_plan_transfers(self, a: PlanTransfersInput) -> dict:
+        self._require_team()
+        keep = {self.resolve(q).id for q in a.keep}
+        avoid = {self.resolve(q).id for q in a.avoid}
+        result = optimizer.plan(self.model, self.state, a.weeks, a.max_per_week, a.allow_hits, keep, avoid)
+        if not result:
+            raise ToolError("Hittade ingen giltig plan.")
+        name = lambda pid: f"{self.model.players[pid].name} ({self.model.players[pid].club}, {self.model.players[pid].price} Mkr)"  # noqa: E731
+        return {
+            "weeks": [
+                {
+                    "gameweek": w["gameweek"],
+                    "transfers": [f"UT {name(o)} → IN {name(i)}" for o, i in zip(w["out"], w["in"])],
+                    "free_transfers_before": w["free_before"],
+                    "penalty": w["penalty"],
+                    "xp": w["expected_points"],
+                    "xp_if_no_transfers": w["hold_points"],
+                    "bank_after": w["bank_after"],
+                }
+                for w in result["weeks"]
+            ],
+            "net_gain": result["net_gain"],
+            "penalty": result["penalty"],
+            "note": "Veckor utan free_transfers_before ligger efter planen och visar att bytena håller även efteråt.",
+        }
 
     def _require_memory(self) -> ProfileMemory:
         if self.memory is None:

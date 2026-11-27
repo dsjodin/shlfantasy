@@ -57,7 +57,7 @@ def _fake_weeks(n):
 def _patch(monkeypatch, n_weeks, current_mae, candidate_mae, current_lineup=0.4, candidate_lineup=0.4):
     candidate = Params(prior_strength=2.0, form_weight=0.5)
     monkeypatch.setattr(tuning, "build_weeks", lambda snap, archive=None: _fake_weeks(n_weeks))
-    monkeypatch.setattr(tuning, "grid_search", lambda weeks, grid: (candidate, {}))
+    monkeypatch.setattr(tuning, "grid_search", lambda weeks, grid, **_: (candidate, {}))
 
     def fake_eval(weeks, params):
         if params == candidate:
@@ -149,3 +149,36 @@ def test_memory_tools(memory, model, state):
         box.run("forget", {"note_id": saved["id"]})
     with pytest.raises(ToolError):
         Toolbox(model, state).run("get_memory", {})
+
+
+def test_saved_params_keep_newer_features(tmp_path):
+    """Vikter sparade innan en funktion fanns ska inte stänga av den."""
+    import json
+
+    from app.projection import DEFAULT_PARAMS
+    from app.tuning import ParamStore
+
+    (tmp_path / "params.json").write_text(json.dumps({"params": {"prior_strength": 4.0, "form_weight": 0.2}}))
+    current = ParamStore(tmp_path).current()
+    assert current.prior_strength == 4.0 and current.form_weight == 0.2
+    assert current.category_model == DEFAULT_PARAMS.category_model is True
+    assert current.recent_play_weight == DEFAULT_PARAMS.recent_play_weight > 0
+    assert current.toi_trend_weight == DEFAULT_PARAMS.toi_trend_weight > 0
+
+
+def test_grid_search_keeps_features_from_base(monkeypatch):
+    """Kandidaterna i viktsökningen ska utgå från gällande vikter, inte från Params grundvärden."""
+    from app import backtest
+    from app.projection import DEFAULT_PARAMS
+
+    seen = []
+
+    def fake_evaluate(weeks, params):
+        seen.append(params)
+        return {"mae": 1.0 + params.form_weight, "lineup_efficiency": 0.5}
+
+    monkeypatch.setattr(backtest, "evaluate", fake_evaluate)
+    params, _ = backtest.grid_search([], (4.0,), base=DEFAULT_PARAMS)
+    assert len(seen) > 10
+    assert all(p.category_model and p.recent_play_weight > 0 and p.toi_trend_weight > 0 for p in seen)
+    assert params.category_model is True
