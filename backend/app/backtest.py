@@ -34,10 +34,11 @@ from .projection import (
     expected_per_game,
     game_multiplier,
     price_priors,
+    swept_clubs,
     team_strength,
 )
 from .rules import LINEUP_COMPOSITION, POSITIONS
-from .trend import WeekStat, plus_minus_per_game, recent_play_rate, toi_by_week, toi_ratio
+from .trend import WeekStat, plus_minus_per_game, recent_play_rate, spike_per_game, toi_by_week, toi_ratio
 from .trend import compute as compute_trend
 
 FORM_TEAM_GAMES = 5
@@ -155,7 +156,8 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
     priors = price_priors([asdict(r) for r in week.rows], POSITIONS)
     complete = {r.pid for r in week.rows if categories_complete(r.cats, round(r.ppg * r.games_played))}
     means = category_means((r.position, r.cats, r.games_played) for r in week.rows if r.pid in complete)
-    strength = team_strength(week.played_before, params.team_prior_games)
+    strength = team_strength(week.played_before, params.team_prior_games, params.team_half_life)
+    hot = swept_clubs(week.played_before, week.number - 1) if params.hot_week_penalty else set()
     out = []
     for r in week.rows:
         trend = compute_trend(r.weeks, params.play_half_life) if params.points_trend_weight else None
@@ -166,7 +168,7 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
             and r.position in means
             and r.pid in complete
         )
-        per_game, _ = expected_per_game(
+        per_game, play_rate = expected_per_game(
             price=r.price,
             games_played=r.games_played,
             ppg=category_ppg(r.cats, r.games_played, means[r.position], params) if use_categories else r.ppg,
@@ -178,9 +180,13 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
             ppg_delta=trend.ppg_delta if trend else 0.0,
             pm_per_game=plus_minus_per_game(r.weeks) if r.position != "GK" else 0.0,
             toi_ratio=toi_ratio(r.weeks) if r.position != "GK" else None,
+            spike=spike_per_game(r.weeks) if r.position != "GK" else 0.0,
         )
         mult = sum(game_multiplier(r.position, opp, home, strength, params) for opp, home in r.fixtures)
-        out.append((r, per_game * mult))
+        xp = per_game * mult
+        if r.club in hot:
+            xp = max(0.0, xp - params.hot_week_penalty * len(r.fixtures) * play_rate)
+        out.append((r, xp))
     return out
 
 
@@ -270,6 +276,10 @@ def report(
     models.append({"key": "no_categories", "name": "Modellen utan kategorivikter (bara PDO)", **evaluate(weeks, no_cat)})
     no_pdo = replace(params, category_model=False, pdo_weight=0.0)
     models.append({"key": "no_pdo", "name": "Modellen utan kategorivikter och PDO", **evaluate(weeks, no_pdo)})
+    no_spike = replace(params, spike_weight=0.0)
+    models.append({"key": "no_spike", "name": "Modellen utan dämpning av toppvecka", **evaluate(weeks, no_spike)})
+    no_hot = replace(params, hot_week_penalty=0.0)
+    models.append({"key": "no_hot_week", "name": "Modellen utan avdrag efter het lagvecka", **evaluate(weeks, no_hot)})
     no_toi = replace(params, toi_trend_weight=0.0)
     models.append({"key": "no_toi_trend", "name": "Modellen utan istidstrend", **evaluate(weeks, no_toi)})
     with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)

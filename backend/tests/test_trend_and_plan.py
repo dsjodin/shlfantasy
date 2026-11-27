@@ -189,3 +189,30 @@ def test_toi_trend_needs_recent_games():
 
     weeks = [WeekStat(1, 4, 20, 4, 0, 4 * 900, 4), WeekStat(2, 0, 0, 2), WeekStat(3, 0, 0, 2)]
     assert toi_ratio(weeks) is None
+
+
+# ---------------------------------------------------------------- heta perioder
+
+
+def test_swept_clubs_needs_all_wins_and_two_games():
+    from app.projection import swept_clubs
+
+    games = [
+        {"gameweek": 5, "home": "TIK", "away": "FBK", "home_score": 8, "away_score": 2},
+        {"gameweek": 5, "home": "LHC", "away": "TIK", "home_score": 2, "away_score": 3},
+        {"gameweek": 5, "home": "SKE", "away": "MIF", "home_score": 4, "away_score": 1},
+        {"gameweek": 4, "home": "MIF", "away": "TIK", "home_score": 5, "away_score": 0},
+    ]
+    assert swept_clubs(games, 5) == {"TIK"}  # SKE vann bara en match
+    assert swept_clubs(games, 4) == set()
+
+
+def test_spike_dampens_single_huge_week():
+    from app.trend import spike_per_game
+
+    steady = [WeekStat(w, 2, 10, 2) for w in range(1, 6)]
+    spiky = [WeekStat(w, 2, 10, 2) for w in range(1, 5)] + [WeekStat(5, 2, 45, 2)]
+    assert spike_per_game(steady) == 0.0
+    assert spike_per_game(spiky) == (45 - 10) / 10
+    args = {"price": 8.0, "games_played": 10, "ppg": 6.5, "form": 6.5, "team_games": 10, "prior": (1.0, 0.5), "params": DEFAULT_PARAMS}
+    assert expected_per_game(**args, spike=spike_per_game(spiky))[0] < expected_per_game(**args)[0]

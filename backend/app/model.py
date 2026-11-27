@@ -35,10 +35,11 @@ from .projection import (
     expected_per_game,
     game_multiplier,
     price_priors,
+    swept_clubs,
     team_strength,
 )
 from .rules import POSITIONS
-from .trend import FLAT, Trend, WeekStat, recent_play_rate, toi_by_week, toi_ratio
+from .trend import FLAT, Trend, WeekStat, recent_play_rate, spike_per_game, toi_by_week, toi_ratio
 from .trend import compute as compute_trend
 
 # Multiplikator per vecka framåt (0 = nästa vecka) beroende på status
@@ -69,6 +70,8 @@ class Player:
     xp: dict[int, float] = field(default_factory=dict)
     history: list[dict[str, int]] = field(default_factory=list)
     trend: Trend = FLAT
+    hot_week_penalty: float = 0.0  # avdrag nästa vecka efter att laget vunnit allt (xP)
+    spike: float = 0.0  # bästa veckans överskott per spelad match (trend.spike_per_game)
 
     def age_on(self, day: date) -> int | None:
         if not self.birth_date:
@@ -181,9 +184,15 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
         for r in snap.players
         if categories_complete(r["breakdown"], r["total_points"])
     )
-    strength = team_strength((g for g in games if g["played"]), params.team_prior_games)
+    strength = team_strength((g for g in games if g["played"]), params.team_prior_games, params.team_half_life)
     birthdates = snap.birthdates
     upcoming = [gw["number"] for gw in gameweeks if gw["status"] == "upcoming"]
+    # Lag som vann alla matcher veckan före nästa matchvecka (se projection.swept_clubs)
+    hot_clubs = (
+        swept_clubs((g for g in games if g["played"]), upcoming[0] - 1)
+        if upcoming and params.hot_week_penalty
+        else set()
+    )
 
     players: dict[str, Player] = {}
     for raw in snap.players:
@@ -207,6 +216,7 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
         )
         weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}), toi.get(p.id))
         p.trend = compute_trend(weeks, params.play_half_life)
+        p.spike = spike_per_game(weeks) if p.position != "GK" else 0.0
         # För skadade och frånvarande sköter statusen nedtrappningen. Speltidstrenden skulle
         # annars räkna frånvaron en gång till.
         # Saknas veckohistorik (t.ex. en veckofil som inte gick att hämta) skulle det se ut
@@ -237,6 +247,7 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             if p.games_played and p.position != "GK"
             else 0.0,
             toi_ratio=toi_ratio(weeks) if p.position != "GK" else None,
+            spike=p.spike,
         )
         p.xp_per_game = round(per_game, 2)
 
@@ -247,7 +258,13 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
                 game_multiplier(p.position, f["opponent"], f["home"], strength, params)
                 for f in fixtures.get(p.club, {}).get(gw, [])
             )
-            p.xp[gw] = round(per_game * week * status_mult, 2)
+            xp = per_game * week * status_mult
+            if i == 0 and p.club in hot_clubs:
+                n = len(fixtures.get(p.club, {}).get(gw, []))
+                penalty = params.hot_week_penalty * n * p.play_rate * status_mult
+                p.hot_week_penalty = round(min(penalty, xp), 2)
+                xp = max(0.0, xp - penalty)
+            p.xp[gw] = round(xp, 2)
         players[p.id] = p
 
     return Model(

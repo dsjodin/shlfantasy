@@ -70,7 +70,20 @@ Matchrapporterna har istid, kedja, powerplaymål, powerplayskott och skott per s
 - Motståndets styrka mätt i skott i stället för mål: bästa elvan svängde kraftigt mellan veckorna och medelfelet blev sämre i fyra veckor. Används inte.
 - Målvakter (startandel, krympning): inget försök förbättrade prognosen. Målvakternas veckopoäng är svåra att förutsäga, och underlaget är litet (17 målvakter).
 
-Sammantaget gick medelfelet från 4,38 till 4,15 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,49 och bästa elvan från 46 % till 54 %.
+### Heta perioder
+
+Spelare i lag som vunnit alla sina matcher en vecka gör i snitt klart sämre än väntat veckan efter. I testveckorna missade modellen med −1,3 poäng per spelare och vecka för dem, mot +0,3 för övriga. Effekten fanns kvar även i en modell som bara använder pris och speltid, så den kommer inte från formen. En vecka där allt studsar rätt höjer både poängsnittet och priset, men håller sällan i sig. Effekten är borta två veckor senare.
+
+Samma sak gäller en enskild extrem vecka för en spelare, som när Timrå vann med 8–2 och Eddie Genborg tog 45 poäng på en vecka. Den drar upp snittet långt efteråt.
+
+Två korrigeringar finns därför med, båda korsvaliderade (anpassade på udda veckor och prövade på jämna, och tvärtom):
+
+- Avdrag med 0,5 poäng per match nästa vecka för spelare i lag som vann alla sina matcher (minst två) veckan innan.
+- En fjärdedel av bästa veckans överskott över spelarens typiska vecka räknas bort. Hårdare dämpning gav sämre resultat.
+
+Tillsammans gav de medelfel 4,15 → 4,10 och bästa elvan 54 % → 57 %. Att väga motståndarens senaste veckor tyngre i lagstyrkan testades också men gav ingen förbättring.
+
+Sammantaget gick medelfelet från 4,38 till 4,10 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,50 och bästa elvan från 46 % till 57 %.
 
 ## Lär sig systemet?
 

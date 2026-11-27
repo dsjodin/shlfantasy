@@ -15,6 +15,9 @@ class Params:
     gk_opponent_weight: float = 0.0  # målvakter: effekt av motståndarens gjorda mål
     home_advantage: float = 0.0  # +x hemma, −x borta
     team_prior_games: float = 6.0  # krympning av lagstyrka mot ligasnittet
+    team_half_life: float = 0.0  # veckor; 0 = alla säsongens matcher väger lika i lagstyrkan
+    hot_week_penalty: float = 0.0  # avdrag per match veckan efter att laget vunnit alla sina matcher
+    spike_weight: float = 0.0  # andel av bästa veckans överskott som räknas bort (utespelare)
     recent_play_weight: float = 0.0  # 0 = säsongens speltidsandel, 1 = senaste veckornas
     play_half_life: float = 1.5  # veckor, för speltidstrenden
     points_trend_weight: float = 0.0  # hur mycket poängtrenden (senaste veckorna mot säsongen) väger
@@ -51,6 +54,11 @@ DEFAULT_PARAMS = Params(
     scoring_shrink=10.0,
     # Istidstrend från matchrapporterna: bättre eller lika i alla testveckor (README).
     toi_trend_weight=1.0,
+    # Återgång efter en het lagvecka. Korsvaliderat: båda halvorna av testveckorna valde
+    # 0,5–0,75 och blev bättre på veckorna de inte anpassats på. Det lägre värdet används.
+    hot_week_penalty=0.5,
+    # En enda extrem vecka: korsvaliderat, båda halvorna valde 0,25–0,5. Det lägre används.
+    spike_weight=0.25,
 )
 
 # Poängkategorier för utespelare, grupperade efter hur väl de upprepar sig från vecka till vecka
@@ -122,20 +130,29 @@ class TeamStrength:
         return self.goals_against.get(club, self.average) / self.average if self.average else 1.0
 
 
-def team_strength(played_games: Iterable[dict[str, Any]], prior_games: float) -> TeamStrength:
+def team_strength(
+    played_games: Iterable[dict[str, Any]], prior_games: float, half_life: float = 0.0
+) -> TeamStrength:
+    """Gjorda och insläppta mål per match, krympta mot ligasnittet.
+
+    Med half_life > 0 väger senare veckor tyngre: en match half_life veckor bak väger hälften
+    så mycket som en match den senaste veckan. Det fångar lag som vänt en svag period.
+    """
+    games = [g for g in played_games if g.get("home_score") is not None and g.get("away_score") is not None]
+    last = max((g.get("gameweek") or 0 for g in games), default=0)
     gf: dict[str, float] = {}
     ga: dict[str, float] = {}
-    n: dict[str, int] = {}
+    n: dict[str, float] = {}
     total_goals = 0
     total_team_games = 0
-    for g in played_games:
-        hs, as_ = g.get("home_score"), g.get("away_score")
-        if hs is None or as_ is None:
-            continue
+    for g in games:
+        hs, as_ = g["home_score"], g["away_score"]
+        age = last - g["gameweek"] if half_life > 0 and g.get("gameweek") else 0
+        w = 0.5 ** (age / half_life) if half_life > 0 else 1.0
         for club, scored, conceded in ((g["home"], hs, as_), (g["away"], as_, hs)):
-            gf[club] = gf.get(club, 0) + scored
-            ga[club] = ga.get(club, 0) + conceded
-            n[club] = n.get(club, 0) + 1
+            gf[club] = gf.get(club, 0) + w * scored
+            ga[club] = ga.get(club, 0) + w * conceded
+            n[club] = n.get(club, 0) + w
         total_goals += hs + as_
         total_team_games += 2
     avg = total_goals / total_team_games if total_team_games else 0.0
@@ -145,6 +162,27 @@ def team_strength(played_games: Iterable[dict[str, Any]], prior_games: float) ->
         goals_against={c: shrink(ga[c], n[c]) for c in n},
         average=avg,
     )
+
+
+HOT_WEEK_MIN_GAMES = 2
+
+
+def swept_clubs(played_games: Iterable[dict[str, Any]], gameweek: int) -> set[str]:
+    """Lag som vann alla sina matcher (minst två) en viss matchvecka.
+
+    Spelare i sådana lag gör i snitt klart sämre än väntat veckan efter: en vecka där allt
+    studsar rätt höjer både poängsnittet och priset, men håller sällan i sig. Effekten är
+    borta två veckor senare, så avdraget gäller bara nästa vecka.
+    """
+    record: dict[str, list[int]] = {}
+    for g in played_games:
+        if g.get("gameweek") != gameweek or g.get("home_score") is None or g.get("away_score") is None:
+            continue
+        for club, scored, conceded in ((g["home"], g["home_score"], g["away_score"]), (g["away"], g["away_score"], g["home_score"])):
+            r = record.setdefault(club, [0, 0])
+            r[0] += scored > conceded
+            r[1] += 1
+    return {c for c, (wins, n) in record.items() if n >= HOT_WEEK_MIN_GAMES and wins == n}
 
 
 def expected_per_game(
@@ -160,6 +198,7 @@ def expected_per_game(
     ppg_delta: float = 0.0,
     pm_per_game: float = 0.0,
     toi_ratio: float | None = None,
+    spike: float = 0.0,
 ) -> tuple[float, float]:
     """Förväntade poäng per lagmatch och speltidsandel.
 
@@ -189,6 +228,8 @@ def expected_per_game(
     per_game += params.points_trend_weight * ppg_delta * play_rate
     # Samma andel som spelarens egen statistik väger i krympningen ovan
     per_game -= params.pdo_weight * pm_per_game * gp / (gp + params.prior_strength) * play_rate
+    # Bästa veckans överskott (trend.spike_per_game) räknas delvis bort
+    per_game -= params.spike_weight * spike * play_rate
     if toi_ratio is not None and params.toi_trend_weight:
         ratio = min(max(toi_ratio, TOI_RATIO_BOUNDS[0]), TOI_RATIO_BOUNDS[1])
         per_game *= 1 + params.toi_trend_weight * (ratio - 1)

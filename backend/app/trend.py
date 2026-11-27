@@ -176,3 +176,18 @@ def compute(weeks: list[WeekStat], play_half_life: float) -> Trend:
 def plus_minus_per_game(weeks: list[WeekStat]) -> float:
     games = sum(w.games for w in weeks)
     return sum(w.pm for w in weeks) / games if games else 0.0
+
+
+def spike_per_game(weeks: list[WeekStat]) -> float:
+    """Hur mycket spelarens bästa vecka ligger över en typisk vecka, utslaget per spelad match
+    över säsongen. En enda vecka med 45 poäng drar annars upp snittet långt efteråt, men
+    sådana veckor upprepas sällan (se README, "En extrem vecka")."""
+    played = [w for w in weeks if w.games > 0]
+    games = sum(w.games for w in played)
+    if len(played) < 3 or not games:
+        return 0.0
+    rates = sorted(w.points / w.games for w in played)
+    mid = len(rates) // 2
+    typical = rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
+    best = max(played, key=lambda w: w.points / w.games)
+    return max(0.0, (best.points - typical * best.games) / games)

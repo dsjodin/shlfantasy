@@ -101,6 +101,14 @@ export function PlayerDetail({ id, onClose }: { id: string; onClose: () => void 
                 </div>
               ))}
             </div>
+            {p.adjustments && (p.adjustments.hot_week_penalty > 0 || p.adjustments.spike_per_game >= 0.2) && (
+              <p className="hint">
+                {p.adjustments.hot_week_penalty > 0 &&
+                  `Laget vann alla matcher förra veckan. Sådana veckor brukar följas av en sämre, så xP nästa vecka är sänkt med ${num(p.adjustments.hot_week_penalty)}. `}
+                {p.adjustments.spike_per_game >= 0.2 &&
+                  `En enskild toppvecka står för en stor del av poängen. Den upprepas sällan, så xP är sänkt med ${num(p.adjustments.spike_per_game)} per match.`}
+              </p>
+            )}
             <h4>Kommande veckor</h4>
             <table className="mini-table">
               <tbody>
