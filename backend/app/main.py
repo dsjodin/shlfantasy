@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backtest, optimizer
+from . import backtest, exceptions, optimizer
 from .advisor import Advisor, review_prompt
 from .archive import PredictionArchive
 from .config import get_settings
@@ -50,21 +50,33 @@ teams = TeamStore(settings.data_dir)
 archive = PredictionArchive(settings.data_dir)
 params_store = ParamStore(settings.data_dir)
 _model_cache: dict[str, Any] = {"version": None, "model": None, "trend_model": None}
+_absence_cache: dict[str, Any] = {"mtime": None, "absences": [], "errors": []}
+
+
+def current_absences() -> tuple[list[exceptions.Absence], list[str]]:
+    """Frånvaroundantagen läses om när filen ändras, så att den går att redigera utan omstart."""
+    path = exceptions.path_for(settings.data_dir)
+    mtime = path.stat().st_mtime if path.exists() else None
+    if mtime != _absence_cache["mtime"]:
+        _absence_cache["absences"], _absence_cache["errors"] = exceptions.load(settings.data_dir)
+        _absence_cache["mtime"] = mtime
+    return _absence_cache["absences"], _absence_cache["errors"]
 
 
 def current_model(points_trend: bool = False) -> Model:
     """Modellen som används överallt, med de vikter som gäller just nu (se tuning.py).
     points_trend=True ger en variant där poängtrenden vägs in, som ett val i den
     långsiktiga planeraren."""
-    version = (store.version, params_store.version)
+    absences, _ = current_absences()
+    version = (store.version, params_store.version, _absence_cache["mtime"])
     if _model_cache["version"] != version or _model_cache["model"] is None:
-        _model_cache["model"] = build_model(store.snapshot, params_store.current())
+        _model_cache["model"] = build_model(store.snapshot, params_store.current(), absences)
         _model_cache["trend_model"] = None
         _model_cache["version"] = version
     if points_trend:
         if _model_cache["trend_model"] is None:
             params = replace(params_store.current(), points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
-            _model_cache["trend_model"] = build_model(store.snapshot, params)
+            _model_cache["trend_model"] = build_model(store.snapshot, params, absences)
         model = _model_cache["trend_model"]
     else:
         model = _model_cache["model"]
@@ -92,7 +104,7 @@ async def _after_refresh() -> None:
     gw = archive.record(current_model())
     if gw:
         log.info("Prognos för matchvecka %s sparad", gw)
-    entry = await asyncio.to_thread(params_store.maybe_tune, store.snapshot, archive)
+    entry = await asyncio.to_thread(params_store.maybe_tune, store.snapshot, archive, current_absences()[0])
     if entry:
         log.info("Viktjustering efter vecka %s: %s", entry["week"], entry["reason"])
         if entry.get("adopted"):
@@ -130,7 +142,7 @@ def status() -> dict:
         "loaded": store.is_loaded,
         "season": snap.season,
         "fetched_at": snap.fetched_at,
-        "errors": snap.errors,
+        "errors": snap.errors + current_absences()[1],
         "players": len(snap.players),
         "games": len(snap.games),
         "birthdates": len(snap.birthdates),
@@ -188,9 +200,11 @@ _quality_cache: dict[str, Any] = {"version": -1, "report": None}
 async def model_quality() -> dict:
     """Backtest: hur väl modellen hade förutsagt de matchveckor som redan är spelade."""
     model = current_model()
-    version = (store.version, params_store.version, tuple(archive.weeks()))
+    version = (store.version, params_store.version, tuple(archive.weeks()), _absence_cache["mtime"])
     if _quality_cache["version"] != version:
-        _quality_cache["report"] = await asyncio.to_thread(backtest.report, store.snapshot, model.params, archive)
+        _quality_cache["report"] = await asyncio.to_thread(
+            backtest.report, store.snapshot, model.params, archive, current_absences()[0]
+        )
         _quality_cache["version"] = version
     return {**_quality_cache["report"], "tuning_log": params_store.log()[:10]}
 
@@ -342,6 +356,7 @@ class SuggestIn(BaseModel):
     free_card: bool = False
     keep: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
+    include_cards: bool = True
 
 
 class PlanIn(BaseModel):
@@ -351,6 +366,7 @@ class PlanIn(BaseModel):
     points_trend: bool = False
     keep: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
+    include_cards: bool = True
 
 
 class BuildIn(BaseModel):
@@ -388,7 +404,15 @@ async def transfers_suggest(body: SuggestIn, profile: str = Profile) -> dict:
     if not state.player_ids:
         raise HTTPException(400, "Lägg in ditt lag först.")
     options = await asyncio.to_thread(
-        optimizer.suggest, model, state, body.horizon, body.max_transfers, body.free_card, set(body.keep), set(body.avoid)
+        optimizer.suggest,
+        model,
+        state,
+        body.horizon,
+        body.max_transfers,
+        body.free_card,
+        set(body.keep),
+        set(body.avoid),
+        body.include_cards,
     )
     return {"options": options}
 
@@ -408,6 +432,7 @@ async def transfers_plan(body: PlanIn, profile: str = Profile) -> dict:
         body.allow_hits,
         set(body.keep),
         set(body.avoid),
+        body.include_cards,
     )
     if not result:
         raise HTTPException(400, "Hittade ingen giltig plan.")

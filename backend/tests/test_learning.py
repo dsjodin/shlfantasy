@@ -56,7 +56,7 @@ def _fake_weeks(n):
 
 def _patch(monkeypatch, n_weeks, current_mae, candidate_mae, current_lineup=0.4, candidate_lineup=0.4):
     candidate = Params(prior_strength=2.0, form_weight=0.5)
-    monkeypatch.setattr(tuning, "build_weeks", lambda snap, archive=None: _fake_weeks(n_weeks))
+    monkeypatch.setattr(tuning, "build_weeks", lambda snap, archive=None, **_: _fake_weeks(n_weeks))
     monkeypatch.setattr(tuning, "grid_search", lambda weeks, grid, **_: (candidate, {}))
 
     def fake_eval(weeks, params):

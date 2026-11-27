@@ -40,6 +40,8 @@ export interface Player {
   games: Record<string, number>;
   trend: Trend;
   adjustments?: { hot_week_penalty: number; spike_per_game: number };
+  stability?: Stability | null;
+  absence?: Absence | null;
   breakdown?: Record<string, number>;
   history?: { gameweek: number; games: number; points: number }[];
   fixtures?: Record<string, string[]>;
@@ -56,6 +58,46 @@ export interface Trend {
   weeks: number;
   season_toi: number | null;
   recent_toi: number | null;
+}
+
+export interface Stability {
+  best_week: number;
+  best_week_points: number;
+  best_week_share: number | null;
+  ppg_excl_best: number | null;
+  median_week: number;
+  week_sd: number;
+  weeks: number;
+}
+
+export interface Absence {
+  absences: { reason: string; from: string; to: string; expected_return: string | null; note: string }[];
+  excused_games: number;
+  play_rate: number;
+  play_rate_without: number;
+  overrides_status: boolean;
+}
+
+export interface CardImpact {
+  gameweeks: number[];
+  value_before: number;
+  value_after: number;
+  change: number;
+  per_card: Record<
+    string,
+    {
+      name: string;
+      before: { gameweek: number; gain: number } | null;
+      after: { gameweek: number; gain: number } | null;
+      change: number;
+    }
+  >;
+}
+
+export interface CardScheduleItem {
+  gameweek: number;
+  card: string;
+  name: string;
 }
 
 export interface Issue {
@@ -119,11 +161,14 @@ export interface Evaluation {
   xp_gain_horizon: number;
   net_gain: number;
   per_week: { gameweek: number; before: number; after: number }[];
+  cards: CardImpact | null;
+  net_gain_incl_cards: number;
 }
 
 export interface Suggestion extends Evaluation {
   out: string[];
   in: string[];
+  card_schedule?: CardScheduleItem[];
 }
 
 export interface Alternative {
@@ -181,6 +226,9 @@ export interface TransferPlan {
   free_transfers_after: number;
   trends: Record<string, Trend>;
   points_trend: boolean;
+  card_schedule: CardScheduleItem[];
+  cards: CardImpact;
+  net_gain_incl_cards: number;
 }
 
 export interface Gameweek {

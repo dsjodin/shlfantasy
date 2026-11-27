@@ -91,6 +91,30 @@ export function PlayerDetail({ id, onClose }: { id: string; onClose: () => void 
                 och räknas därför inte in.
               </p>
             )}
+            {p.absence && (
+              <div className="alert info">
+                {p.absence.absences.map((a, i) => (
+                  <div key={i}>
+                    Borta {a.from === a.to ? a.from : `${a.from}–${a.to}`} ({a.reason}
+                    {a.expected_return ? `, väntas tillbaka ${a.expected_return}` : ""}){a.note ? `: ${a.note}` : ""}.
+                  </div>
+                ))}
+                {p.absence.excused_games > 0 && (
+                  <div>
+                    {p.absence.excused_games} missade matcher räknas inte: speltidsandel {num(p.absence.play_rate, 2)} i
+                    stället för {num(p.absence.play_rate_without, 2)}.
+                  </div>
+                )}
+              </div>
+            )}
+            {p.stability && (
+              <p className="hint">
+                Jämnhet: bästa veckan (v.{p.stability.best_week}, {p.stability.best_week_points} p) står för{" "}
+                {p.stability.best_week_share !== null ? `${Math.round(p.stability.best_week_share * 100)} %` : "–"} av
+                poängen. Utan den {p.stability.ppg_excl_best !== null ? num(p.stability.ppg_excl_best) : "–"} p/match.
+                Median {num(p.stability.median_week)} p per vecka, spridning ±{num(p.stability.week_sd)}.
+              </p>
+            )}
             <h4>Poäng per matchvecka</h4>
             <div className="history">
               {(p.history ?? []).map((h) => (

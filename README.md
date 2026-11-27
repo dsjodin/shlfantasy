@@ -25,7 +25,8 @@ Profilerna har inget lösenord. Det räcker på hemnätet men betyder att vem so
 - Byten: välj vem som ska ut och se direkt vad du har att lägga, vilka som är möjliga och modellens bästa ersättare. Kalkylatorn visar bank efter byte, poängavdrag och förväntad poängförändring vecka för vecka. Optimeraren räknar fram bästa kombinationen av 1 till 4 byten, eller ett helt nytt lag med Fria Byten.
 - Långsiktig byteskedja: planerar byten vecka för vecka över 2 till 6 veckor. Gratisbyten sparas (max 2) och varje extra byte kostar 10 poäng, så planen avgör om det lönar sig att ta avdrag nu eller vänta på nästa gratisbyte. Särskilt användbart när gratisbytena är slut. Två veckor efter planen räknas också med, så att sena byten måste hålla även efteråt.
 - Kapten och kort: förväntad extra poäng per coachkort och vecka med din trupp, en kortplan som fördelar de kort du har kvar med högst ett kort per vecka, och matchschema per lag och vecka. Förbrukade kort markeras direkt på sidan.
-- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare, inklusive formtrend (pil uppåt eller nedåt).
+- Coachkort i bytena: bytesförslag, kalkylatorn och den långsiktiga planen räknar med kortplanen. Ett byte som säljer en veteran inför ett Veteraner-kort syns som en sänkning av det kortet, och optimeringen väger in det när den väljer byten (se nedan).
+- Spelare: sorterbar och filtrerbar tabell med detaljvy per spelare, inklusive formtrend (pil uppåt eller nedåt), jämnhet (hur stor del av poängen bästa veckan står för) och frånvaroundantag.
 - AI-rådgivare: chatt med Claude som har verktyg för att läsa ditt lag, söka spelare, räkna på byten, köra optimeraren och planera byteskedjor. Från bytessidan kan du också låta AI:n granska ett planerat byte.
 
 ## Så räknas xP (förväntade poäng)
@@ -84,6 +85,57 @@ Två korrigeringar finns därför med, båda korsvaliderade (anpassade på udda 
 Tillsammans gav de medelfel 4,15 → 4,10 och bästa elvan 54 % → 57 %. Att väga motståndarens senaste veckor tyngre i lagstyrkan testades också men gav ingen förbättring.
 
 Sammantaget gick medelfelet från 4,38 till 4,10 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,50 och bästa elvan från 46 % till 57 %.
+
+### Testat men inte infört: hårdare dämpning av toppveckor
+
+Efter en rådgivningssession testades fler sätt att hantera toppveckor och heta perioder. Alla prövades utanför träningsdatan: för varje testvecka (5–9) valdes variantens inställning på veckorna före, och den mättes sedan på testveckan. Udda/jämna veckor användes som extra kontroll. Kriteriet bestämdes i förväg: medelfelet minst 0,5 % lägre, rangkorrelation och köpträff inte sämre, bättre i en majoritet av testveckorna och åt samma håll i udda/jämna-kontrollen. Köpträff är de faktiska poängen för modellens fem bästa per position som andel av de fem faktiskt bästas.
+
+| Variant | Medelfel | Rangkorr. | Köpträff | Bästa elvan | Veckor bättre | Infört |
+|---|---|---|---|---|---|---|
+| Dagens modell | 3,919 | 0,500 | 56,1 % | 56,6 % | | |
+| a) Tak för mål/assist per vecka (positionens 90:e–97,5:e percentil) | 3,919 | 0,501 | 59,2 % | 56,7 % | 3 av 5 | Nej |
+| a) Tak, utan dagens toppveckedämpning | 3,933 | 0,499 | 57,2 % | 55,1 % | 1 av 5 | Nej |
+| b) Lagets poäng mot snittet, i stället för vann-allt | 3,938 | 0,485 | 61,2 % | 53,7 % | 2 av 5 | Nej |
+| b) Lagets poäng mot snittet, utöver vann-allt | 3,936 | 0,486 | 61,0 % | 57,5 % | 2 av 5 | Nej |
+| b) Andel spelare med toppvecka, i stället för vann-allt | 3,914 | 0,502 | 56,9 % | 54,7 % | 2 av 5 | Nej |
+| b) Andel spelare med toppvecka, utöver vann-allt | 3,924 | 0,495 | 58,3 % | 58,9 % | 3 av 5 | Nej |
+| b) Lagets PDO, i stället för vann-allt | 3,929 | 0,500 | 56,5 % | 53,9 % | 2 av 5 | Nej |
+| b) Lagets PDO, utöver vann-allt | 3,922 | 0,493 | 57,2 % | 57,9 % | 2 av 5 | Nej |
+| c) Extra krympning av mål/assist över spelarens vanliga nivå | 3,920 | 0,500 | 56,5 % | 56,5 % | 2 av 5 | Nej |
+| c) Samma, utan dagens toppveckedämpning | 3,923 | 0,499 | 57,1 % | 55,0 % | 2 av 5 | Nej |
+| c) Högre krympning av mål och assist (15–40) | 3,926 | 0,503 | 58,3 % | 58,8 % | 2 av 5 | Nej |
+| Starkare toppveckedämpning (0,5 eller 0,75) | 3,918 | 0,497 | 58,4 % | 55,1 % | 2 av 5 | Nej |
+
+Ingen variant förbättrade medelfelet nämnvärt. Flera höjde köpträffen (som mest till 61 %), men utan att medelfelet blev bättre och med bara fem testveckor. Det är värt att köra om när fler veckor spelats. Rangkorrelation, köpträff och den rullande utvärderingen finns kvar i backtesten (`python -m app.backtest`).
+
+### Frånvaro med känd orsak
+
+Statistiken säger bara att en spelare inte spelade, inte varför. Utan mer information sänker frånvaron speltidsandelen och därmed xP, även när spelaren varit borta av privata skäl. Kända orsaker läggs därför för hand i `data/exceptions.json`:
+
+```json
+[
+  {"player_id": "1674", "reason": "privat", "from": "2026-11-21", "to": "2026-11-21",
+   "expected_return": null, "note": "Blev pappa"}
+]
+```
+
+- `reason`: `privat`, `vila`, `skada` eller `avstängning`. `to` och `expected_return` är valfria.
+- Privat och vila: missade lagmatcher inom perioden räknas inte i speltidsandelen.
+- Skada och avstängning: andelen räknas som vanligt, eftersom statusen redan hanterar frånvaron. Undantaget syns ändå i spelardatan.
+- Kommande matcher inom perioden, eller före `expected_return`, räknas som 0. Med ett återkomstdatum ersätter undantaget statusens allmänna nedtrappning.
+- `player_id` är spelarens id i Fantasy SHL. Det finns i `/api/players`, och AI-rådgivaren kan ta fram det om du frågar.
+
+Filen läses om när den ändras, så ingen omstart behövs. Felaktiga rader hoppas över och visas bland felen i statusen. I spelarvyn och för AI-rådgivaren syns undantaget och vad det ändrade, till exempel "speltidsandel 1,00 i stället för 0,83".
+
+### Coachkort i bytesförslagen
+
+Bytesförslagen och den långsiktiga planen räknar med coachkorten. Kort som redan är använda räknas inte, och högst ett kort spelas per vecka.
+
+- Kalkylatorn och planen visar kortplanens värde före och efter, per kort. Det är samma exakta beräkning som på kortsidan, över åtta veckor. "Netto inkl. kort" är bytets nettovinst plus förändringen i kortplanens värde.
+- Optimeringen väger in korten när den väljer byten. Laguttagningen med kortet räknas exakt i optimeringen, även när ett kort gör att en svagare men behörig spelare startar, och Toppa Laget betyder ingen kapten den veckan.
+- Ett kort som sparas till efter horisonten har ett värde. Det värdet räknas bara på behöriga spelare som redan finns i truppen. En såld veteran sänker alltså värdet av ett sparat Veteraner-kort, men optimeringen köper inte spelare för ett kort långt fram, eftersom det skulle bygga på dagens xP för veckor långt bort.
+- Kortschemat och truppen tas fram växelvis. Först räknas den exakta kortplanen för truppen fram, och optimeringen löses med det schemat låst (att spara alla kort prövas också). Sedan räknas kortplanen om för den nya truppen, och optimeringen löses igen om den ändrats. Den bästa lösningen behålls. Att låta optimeringen välja korten helt fritt testades först, men den hann inte lösas: efter 20 sekunder var avståndet till det teoretiskt bästa fortfarande 8 %. Med växlingen tar förslagen cirka 1,5 sekunder och planen några sekunder.
+- Optimeringen kan därför föreslå byten som kostar vanliga poäng men höjer kortplanens värde mer, till exempel att köpa en veteran inför en vecka där Veteraner-kortet ger mycket.
 
 ## Lär sig systemet?
 

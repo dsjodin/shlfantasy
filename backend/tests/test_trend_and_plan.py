@@ -216,3 +216,37 @@ def test_spike_dampens_single_huge_week():
     assert spike_per_game(spiky) == (45 - 10) / 10
     args = {"price": 8.0, "games_played": 10, "ppg": 6.5, "form": 6.5, "team_games": 10, "prior": (1.0, 0.5), "params": DEFAULT_PARAMS}
     assert expected_per_game(**args, spike=spike_per_game(spiky))[0] < expected_per_game(**args)[0]
+
+
+# ---------------------------------------------------------------- stabilitetstal (punkt 3)
+
+
+def test_stability_for_steady_and_spiky_players():
+    from app.trend import stability
+
+    steady = stability([WeekStat(w, 2, 10, 2) for w in range(1, 6)])
+    assert steady["best_week_share"] == 0.2
+    assert steady["ppg_excl_best"] == 5.0
+    assert steady["median_week"] == 10 and steady["week_sd"] == 0
+
+    spiky = stability([WeekStat(w, 2, 8, 2) for w in range(1, 5)] + [WeekStat(5, 2, 45, 2)])
+    assert spiky["best_week"] == 5 and spiky["best_week_points"] == 45
+    assert spiky["best_week_share"] == round(45 / 77, 2)
+    assert spiky["ppg_excl_best"] == 4.0
+    assert spiky["median_week"] == 8
+    assert spiky["week_sd"] > 10
+
+
+def test_stability_needs_three_played_weeks():
+    from app.trend import stability
+
+    assert stability([WeekStat(1, 2, 10, 2), WeekStat(2, 0, 0, 2), WeekStat(3, 1, 5, 2)]) is None
+
+
+def test_stability_is_in_ai_player_views(model):
+    from app.views import compact_player
+
+    p = next(iter(model.players.values()))
+    view = compact_player(model, p, model.horizon(2))
+    for key in ("best_week_share", "ppg_excl_best", "median_week", "week_sd"):
+        assert key in view

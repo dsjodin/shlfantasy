@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from . import exceptions as exc
 from .datastore import Snapshot
 from .projection import (
     DEFAULT_PARAMS,
@@ -39,7 +40,7 @@ from .projection import (
     team_strength,
 )
 from .rules import POSITIONS
-from .trend import FLAT, Trend, WeekStat, recent_play_rate, spike_per_game, toi_by_week, toi_ratio
+from .trend import FLAT, Trend, WeekStat, recent_play_rate, spike_per_game, stability, toi_by_week, toi_ratio
 from .trend import compute as compute_trend
 
 # Multiplikator per vecka framåt (0 = nästa vecka) beroende på status
@@ -72,6 +73,8 @@ class Player:
     trend: Trend = FLAT
     hot_week_penalty: float = 0.0  # avdrag nästa vecka efter att laget vunnit allt (xP)
     spike: float = 0.0  # bästa veckans överskott per spelad match (trend.spike_per_game)
+    stability: dict | None = None  # nyckeltal för jämnhet (trend.stability), bara information
+    absence: dict | None = None  # manuella frånvaroundantag och hur de påverkat speltidsandelen
 
     def age_on(self, day: date) -> int | None:
         if not self.birth_date:
@@ -150,10 +153,13 @@ def _week_stats(
     ]
 
 
-def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
+def build_model(
+    snap: Snapshot, params: Params = DEFAULT_PARAMS, absences: list[exc.Absence] | None = None
+) -> Model:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
 
     fixtures: dict[str, dict[int, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    club_games: dict[str, list[dict[str, Any]]] = defaultdict(list)
     team_games_played: dict[str, int] = defaultdict(int)
     team_games_by_week: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     games = []
@@ -161,6 +167,8 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
         gw = assign_gameweek(raw_game["date"], gameweeks)
         g = {**raw_game, "gameweek": gw}
         games.append(g)
+        club_games[g["home"]].append(g)
+        club_games[g["away"]].append(g)
         if g["played"]:
             team_games_played[g["home"]] += 1
             team_games_played[g["away"]] += 1
@@ -194,6 +202,12 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
         else set()
     )
 
+    absences_by_player = exc.by_player(absences or [])
+    last_game = {
+        club: max((date.fromisoformat(g["date"]) for g in gs if g["played"]), default=None)
+        for club, gs in club_games.items()
+    }
+
     players: dict[str, Player] = {}
     for raw in snap.players:
         if raw["position"] not in POSITIONS:
@@ -214,16 +228,25 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             birth_date=birthdates.get(raw["id"]),
             history=history.get(raw["id"], []),
         )
-        weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}), toi.get(p.id))
+        raw_weeks = _week_stats(p.history, team_games_by_week.get(p.club, {}), toi.get(p.id))
+        # Ursäktad frånvaro (privat/vila) räknas inte i speltidsandelen
+        player_absences = absences_by_player.get(p.id, [])
+        weeks, n_excused = exc.adjust_weeks(
+            raw_weeks, exc.excused_team_games(player_absences, club_games.get(p.club, []))
+        )
+        override_status = exc.overrides_status(player_absences, last_game.get(p.club))
         p.trend = compute_trend(weeks, params.play_half_life)
         p.spike = spike_per_game(weeks) if p.position != "GK" else 0.0
+        p.stability = stability(weeks)
         # För skadade och frånvarande sköter statusen nedtrappningen. Speltidstrenden skulle
         # annars räkna frånvaron en gång till.
         # Saknas veckohistorik (t.ex. en veckofil som inte gick att hämta) skulle det se ut
         # som att spelaren inte spelat. Använd bara trenden när historiken går ihop.
         history_complete = sum(w.games for w in weeks) >= p.games_played - 1
+        # Förklarar ett undantag frånvaron räknas spelaren som aktiv här
+        counts_as_active = p.status == "active" or override_status
         recent_play = (
-            recent_play_rate(weeks, params.play_half_life) if p.status == "active" and history_complete else None
+            recent_play_rate(weeks, params.play_half_life) if counts_as_active and history_complete else None
         )
         use_categories = (
             params.category_model
@@ -233,15 +256,13 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             and categories_complete(p.breakdown, p.total_points)
         )
         ppg = category_ppg(p.breakdown, p.games_played, cat_means[p.position], params) if use_categories else p.ppg
-        per_game, p.play_rate = expected_per_game(
+        inputs = dict(
             price=p.price,
             games_played=p.games_played,
             ppg=ppg,
             form=p.form,
-            team_games=team_games_played.get(p.club, 0),
             prior=priors[p.position],
             params=params,
-            recent_play=recent_play,
             ppg_delta=p.trend.ppg_delta,
             pm_per_game=p.breakdown.get("plus_minus_points", 0) / p.games_played
             if p.games_played and p.position != "GK"
@@ -249,11 +270,37 @@ def build_model(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> Model:
             toi_ratio=toi_ratio(weeks) if p.position != "GK" else None,
             spike=p.spike,
         )
+        per_game, p.play_rate = expected_per_game(
+            **inputs, team_games=team_games_played.get(p.club, 0) - n_excused, recent_play=recent_play
+        )
         p.xp_per_game = round(per_game, 2)
+        if player_absences:
+            # Samma beräkning utan undantaget, för att visa vad det ändrade
+            without_recent = (
+                recent_play_rate(raw_weeks, params.play_half_life)
+                if p.status == "active" and history_complete
+                else None
+            )
+            _, rate_without = expected_per_game(
+                **inputs, team_games=team_games_played.get(p.club, 0), recent_play=without_recent
+            )
+            p.absence = {
+                "absences": [a.to_dict() for a in player_absences],
+                "excused_games": n_excused,
+                "play_rate": round(p.play_rate, 2),
+                "play_rate_without": round(rate_without, 2),
+                "overrides_status": override_status,
+            }
 
         multipliers = STATUS_MULTIPLIERS.get(p.status, STATUS_MULTIPLIERS["active"])
         for i, gw in enumerate(upcoming):
             status_mult = multipliers[min(i, len(multipliers) - 1)]
+            available = exc.availability(player_absences, fixtures.get(p.club, {}).get(gw, []))
+            if override_status:
+                # Undantaget vet mer än statusens allmänna nedtrappning
+                status_mult = 1.0 if available is None else available
+            elif available is not None:
+                status_mult *= available
             week = sum(
                 game_multiplier(p.position, f["opponent"], f["home"], strength, params)
                 for f in fixtures.get(p.club, {}).get(gw, [])

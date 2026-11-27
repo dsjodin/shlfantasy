@@ -210,6 +210,20 @@ def evaluate_transfers(
         }
         for gw in gws
     ]
+    net_gain = after - before - penalty
+    card_gws = model.horizon(CARD_IMPACT_WEEKS)
+    cards = (
+        card_impact(
+            model,
+            state.used_cards,
+            same_squad(state.player_ids, card_gws),
+            same_squad(new_ids, card_gws),
+            # Fria Byten är veckans coachkort, så inget annat kort kan spelas den veckan
+            blocked_after={card_gws[0]} if free_card else None,
+        )
+        if state.player_ids and card_gws
+        else None
+    )
     return {
         "valid": is_valid(issues),
         "issues": [i.__dict__ for i in issues],
@@ -227,8 +241,10 @@ def evaluate_transfers(
         "xp_horizon_before": _r(before),
         "xp_horizon_after": _r(after),
         "xp_gain_horizon": _r(after - before),
-        "net_gain": _r(after - before - penalty),
+        "net_gain": _r(net_gain),
         "per_week": per_week,
+        "cards": cards,
+        "net_gain_incl_cards": _r(net_gain + (cards["change"] if cards else 0.0)),
     }
 
 
@@ -286,14 +302,20 @@ def _card_total(players: list[Player], gw: int, doubled: Callable[[Player], bool
 
 
 def card_analysis(model: Model, state: TeamState, weeks: int = 6) -> list[dict]:
-    players = [model.players[pid] for pid in state.player_ids if pid in model.players]
+    """Förväntad extra poäng per coachkort och vecka med nuvarande trupp."""
+    return card_analysis_for(model, {gw: state.player_ids for gw in model.horizon(weeks)}, state.used_cards)
+
+
+def card_analysis_for(model: Model, squads: dict[int, list[str]], used_cards: list[str]) -> list[dict]:
+    """Samma som card_analysis, men med en trupp per vecka (t.ex. en byteskedja)."""
     result = []
-    for gw in model.horizon(weeks):
+    for gw, ids in sorted(squads.items()):
+        players = [model.players[pid] for pid in ids if pid in model.players]
         info = model.gameweek(gw)
         day = date.fromisoformat(info["start"]) if info else date.today()
-        normal = best_lineup(model, state.player_ids, gw)
+        normal = best_lineup(model, ids, gw)
 
-        def xp(p: Player) -> float:
+        def xp(p: Player, gw: int = gw) -> float:
             return p.xp.get(gw, 0.0)
 
         first_five = _top_by_position(players, FIRST_FIVE_COMPOSITION, xp)
@@ -302,14 +324,14 @@ def card_analysis(model: Model, state: TeamState, weeks: int = 6) -> list[dict]:
             "anfall": _card_total(players, gw, lambda p: p.position == "F") - normal.expected_points,
             "forsvar": _card_total(players, gw, lambda p: p.position == "D") - normal.expected_points,
         }
-        juniors = [p for p in players if (a := p.age_on(day)) is not None and a <= JUNIOR_MAX_AGE]
-        veterans = [p for p in players if (a := p.age_on(day)) is not None and a >= VETERAN_MIN_AGE]
+        juniors = [p for p in players if is_junior(p, day)]
+        veterans = [p for p in players if is_veteran(p, day)]
         has_ages = any(p.birth_date for p in players)
         gains["juniorer"] = (
-            _card_total(players, gw, lambda p: p in juniors) - normal.expected_points if has_ages else None
+            _card_total(players, gw, lambda p, js=juniors: p in js) - normal.expected_points if has_ages else None
         )
         gains["veteraner"] = (
-            _card_total(players, gw, lambda p: p in veterans) - normal.expected_points if has_ages else None
+            _card_total(players, gw, lambda p, vs=veterans: p in vs) - normal.expected_points if has_ages else None
         )
         result.append(
             {
@@ -322,7 +344,7 @@ def card_analysis(model: Model, state: TeamState, weeks: int = 6) -> list[dict]:
                     key: {
                         "name": COACH_CARDS[key],
                         "gain": None if g is None else _r(g),
-                        "used": key in state.used_cards,
+                        "used": key in used_cards,
                     }
                     for key, g in gains.items()
                 },
@@ -331,6 +353,16 @@ def card_analysis(model: Model, state: TeamState, weeks: int = 6) -> list[dict]:
             }
         )
     return result
+
+
+def is_junior(p: Player, day: date) -> bool:
+    age = p.age_on(day)
+    return age is not None and age <= JUNIOR_MAX_AGE
+
+
+def is_veteran(p: Player, day: date) -> bool:
+    age = p.age_on(day)
+    return age is not None and age >= VETERAN_MIN_AGE
 
 
 CARD_MIN_GAIN = 1.0  # ett kort som ger mindre än så är inte värt att lägga en vecka på
@@ -372,3 +404,49 @@ def card_plan(weeks: list[dict], used: list[str], blocked_weeks: set[int] | None
 
 def _name(model: Model, pid: str) -> str:
     return model.players[pid].name if pid in model.players else pid
+
+
+CARD_IMPACT_WEEKS = 8  # samma antal veckor som kortsidan visar
+
+
+def card_impact(
+    model: Model,
+    used_cards: list[str],
+    squads_before: dict[int, list[str]],
+    squads_after: dict[int, list[str]],
+    blocked_after: set[int] | None = None,
+) -> dict:
+    """Hur ett byte eller en byteskedja ändrar värdet av kortplanen (högst ett kort per vecka).
+
+    Exakt beräkning med card_analysis_for och card_plan för truppen före och efter. Det fångar
+    t.ex. att en såld veteran gör Veteraner-kortet mindre värt.
+    """
+    before_plan = card_plan(card_analysis_for(model, squads_before, used_cards), used_cards)
+    after_plan = card_plan(card_analysis_for(model, squads_after, used_cards), used_cards, blocked_after)
+    by_card_before = {c["card"]: c for c in before_plan}
+    by_card_after = {c["card"]: c for c in after_plan}
+    per_card = {}
+    for key, name in COACH_CARDS.items():
+        if key in used_cards or key == "fria_byten":
+            continue
+        b, a = by_card_before.get(key), by_card_after.get(key)
+        gain_b, gain_a = (b["gain"] if b else 0.0), (a["gain"] if a else 0.0)
+        per_card[key] = {
+            "name": name,
+            "before": {"gameweek": b["gameweek"], "gain": gain_b} if b else None,
+            "after": {"gameweek": a["gameweek"], "gain": gain_a} if a else None,
+            "change": _r(gain_a - gain_b),
+        }
+    value_before = sum(c["gain"] for c in before_plan)
+    value_after = sum(c["gain"] for c in after_plan)
+    return {
+        "gameweeks": sorted(squads_before),
+        "value_before": _r(value_before),
+        "value_after": _r(value_after),
+        "change": _r(value_after - value_before),
+        "per_card": per_card,
+    }
+
+
+def same_squad(ids: list[str], gameweeks: list[int]) -> dict[int, list[str]]:
+    return {gw: ids for gw in gameweeks}

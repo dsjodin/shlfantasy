@@ -61,7 +61,15 @@ Så arbetar du:
   senaste två veckorna (från shl.se:s matchrapporter) justerar xP, eftersom den visar ändrad roll.
   En enskild toppvecka dämpas, och spelare i lag som vann alla matcher förra veckan får avdrag
   nästa vecka: backtesten visar att båda brukar följas av sämre utfall. Var skeptisk till köp som
-  bara bygger på ett lags heta period, och säg det till användaren. Fältet trend visar om formen pekar
+  bara bygger på ett lags heta period, och säg det till användaren.
+- Stabilitetstal finns färdiga i spelardatan, räkna inte själv: best_week_share (andel av säsongens
+  poäng från bästa veckan), ppg_excl_best (poäng per match utan bästa veckan), median_week och
+  week_sd (spridning per vecka). Hög best_week_share och stor spridning betyder att snittet bärs av
+  en enstaka vecka. Talen är information och ingår inte i xP utöver dämpningen ovan.
+- Bytesförslag, evaluate_transfers och plan_transfers räknar med coachkorten: net_gain_incl_cards är
+  nettovinsten inklusive hur kortplanens värde ändras. Säger cards att ett byte sänker t.ex.
+  Veteraner-kortet, nämn det. Optimeringen kan föreslå byten som kostar vanliga poäng men höjer
+  kortvärdet mer; förklara den avvägningen när det händer. Fältet trend visar om formen pekar
   upp eller ner. Backtesten visar att en het poängperiod oftast inte håller i sig, medan ändrad
   speltid gör det. Lyft trenden som information, men överdriv den inte. Den vet inget om kedjor,
   powerplay-roller, målvaktsrotation eller nyheter. Lyft sådana osäkerheter när de spelar roll och
@@ -276,6 +284,24 @@ TOOL_LABELS = {
 }
 
 
+def _card_summary(cards: dict | None) -> dict | None:
+    """Kortplanens värde före och efter, och förändringen per kort, i kompakt form."""
+    if not cards:
+        return None
+    per_card = {}
+    for c in cards["per_card"].values():
+        if not c["change"] and not c["before"] and not c["after"]:
+            continue
+        fmt = lambda x: f"v.{x['gameweek']} {x['gain']:+.1f}" if x else "inte i planen"  # noqa: E731
+        per_card[c["name"]] = f"{fmt(c['before'])} → {fmt(c['after'])} ({c['change']:+.1f})"
+    return {
+        "value_before": cards["value_before"],
+        "value_after": cards["value_after"],
+        "change": cards["change"],
+        "per_card": per_card,
+    }
+
+
 class ToolError(Exception):
     pass
 
@@ -454,7 +480,12 @@ class Toolbox:
             ],
             "net_gain": result["net_gain"],
             "penalty": result["penalty"],
-            "note": "Veckor utan free_transfers_before ligger efter planen och visar att bytena håller även efteråt.",
+            "card_schedule": [f"v.{c['gameweek']}: {c['name']}" for c in result["card_schedule"]],
+            "cards": _card_summary(result["cards"]),
+            "net_gain_incl_cards": result["net_gain_incl_cards"],
+            "note": "Veckor utan free_transfers_before ligger efter planen och visar att bytena håller även efteråt. "
+            "card_schedule är kortplanen som optimeringen räknat med. cards visar hur planen ändrar värdet av "
+            "kortplanen (t.ex. en såld veteran som gör Veteraner-kortet mindre värt).",
         }
 
     def _require_memory(self) -> ProfileMemory:
@@ -503,7 +534,10 @@ class Toolbox:
 
     def _named_transfer(self, result: dict, out_ids: list[str], in_ids: list[str]) -> dict:
         gws = result.get("gameweeks", [])
-        summary = {k: v for k, v in result.items() if k not in ("new_player_ids", "out", "in")}
+        summary = {k: v for k, v in result.items() if k not in ("new_player_ids", "out", "in", "cards", "card_reserve")}
+        summary["cards"] = _card_summary(result.get("cards"))
+        if "card_schedule" in result:
+            summary["card_schedule"] = [f"v.{c['gameweek']}: {c['name']}" for c in result["card_schedule"]]
         summary["out"] = [compact_player(self.model, self.model.players[i], gws) for i in out_ids]
         summary["in"] = [compact_player(self.model, self.model.players[i], gws) for i in in_ids]
         return summary

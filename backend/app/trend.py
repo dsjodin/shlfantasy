@@ -191,3 +191,38 @@ def spike_per_game(weeks: list[WeekStat]) -> float:
     typical = rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
     best = max(played, key=lambda w: w.points / w.games)
     return max(0.0, (best.points - typical * best.games) / games)
+
+
+STABILITY_MIN_WEEKS = 3
+
+
+def stability(weeks: list[WeekStat]) -> dict | None:
+    """Nyckeltal för hur jämnt spelaren levererar, för information (påverkar inte xP).
+
+    best_week_share: andel av säsongens poäng från bästa veckan.
+    ppg_excl_best: poäng per match utan bästa veckan.
+    median_week: medianpoäng per vecka (veckor där spelaren spelat minst en match).
+    week_sd: spridning (standardavvikelse) i poäng per vecka.
+    """
+    played = [w for w in weeks if w.games > 0]
+    if len(played) < STABILITY_MIN_WEEKS:
+        return None
+    points = [w.points for w in played]
+    total = sum(points)
+    games = sum(w.games for w in played)
+    best = max(played, key=lambda w: w.points)
+    ordered = sorted(points)
+    mid = len(ordered) // 2
+    median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+    mean = total / len(points)
+    sd = math.sqrt(sum((x - mean) ** 2 for x in points) / len(points))
+    rest_games = games - best.games
+    return {
+        "best_week": best.gameweek,
+        "best_week_points": best.points,
+        "best_week_share": round(best.points / total, 2) if total > 0 else None,
+        "ppg_excl_best": round((total - best.points) / rest_games, 2) if rest_games else None,
+        "median_week": round(median, 1),
+        "week_sd": round(sd, 1),
+        "weeks": len(played),
+    }

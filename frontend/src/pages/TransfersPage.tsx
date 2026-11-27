@@ -10,6 +10,8 @@ import {
   POSITIONS,
   POSITION_NAMES,
   type Alternative,
+  type CardImpact,
+  type CardScheduleItem,
   type Evaluation,
   type Suggestion,
   type TransferPlan,
@@ -307,13 +309,14 @@ function EvaluationView({ evaluation: e }: { evaluation: Evaluation }) {
           ))}
         </ul>
       )}
-      <div className={`verdict ${e.net_gain > 0 ? "good" : "bad"}`}>
+      <div className={`verdict ${e.net_gain_incl_cards > 0 ? "good" : "bad"}`}>
         <strong>{signed(e.net_gain)} xP</strong> netto över {e.gameweeks.length} veckor
         <small>
           ({signed(e.xp_gain_horizon)} xP{e.penalty ? `, −${e.penalty} i avdrag` : ""}) · nästa vecka{" "}
           {num(e.xp_next_before)} → {num(e.xp_next_after)}
         </small>
       </div>
+      <CardImpactView cards={e.cards} netInclCards={e.net_gain_incl_cards} />
       <div className="bars">
         {e.per_week.map((w) => (
           <div key={w.gameweek} className="bar-group">
@@ -383,10 +386,13 @@ function SuggestPanel({ onLoad }: { onLoad: (s: Suggestion) => void }) {
       {options?.map((o, k) => (
         <div key={k} className="suggestion">
           <div className="suggestion-head">
-            <strong className={o.net_gain > 0 ? "good" : "bad"}>{signed(o.net_gain)} xP netto</strong>
+            <strong className={o.net_gain_incl_cards > 0 ? "good" : "bad"}>
+              {signed(o.net_gain_incl_cards)} xP netto
+            </strong>
             <span className="hint">
               {o.out.length} byte{o.out.length > 1 ? "n" : ""}
               {o.penalty ? ` · −${o.penalty} avdrag` : ""} · bank {mkr(o.bank_after)}
+              {o.cards && o.cards.change !== 0 ? ` · varav kort ${signed(o.cards.change)}` : ""}
             </span>
             <button className="small" onClick={() => onLoad(o)}>
               Ladda i kalkylatorn
@@ -485,11 +491,11 @@ function PlanPanel({ onLoad }: { onLoad: (out: string[], inn: string[]) => void 
       {error && <div className="alert error">{error}</div>}
       {plan && (
         <>
-          <div className={`verdict ${plan.net_gain > 0 ? "good" : plan.transfers === 0 ? "" : "bad"}`}>
+          <div className={`verdict ${plan.net_gain_incl_cards > 0 ? "good" : plan.transfers === 0 ? "" : "bad"}`}>
             {plan.transfers === 0 ? (
               <strong>Behåll laget – inga byten lönar sig under perioden</strong>
             ) : (
-              <strong>{signed(plan.net_gain)} xP netto</strong>
+              <strong>{signed(plan.net_gain_incl_cards)} xP netto inkl. kort</strong>
             )}
             <small>
               {plan.transfers} byten · {plan.penalty ? `−${plan.penalty} i avdrag` : "inga avdrag"} · v.
@@ -497,6 +503,8 @@ function PlanPanel({ onLoad }: { onLoad: (out: string[], inn: string[]) => void 
               {num(plan.xp_plan)} xP
             </small>
           </div>
+          <CardScheduleView schedule={plan.card_schedule} />
+          <CardImpactView cards={plan.cards} netInclCards={plan.net_gain_incl_cards} />
           <div className="plan">
             {plan.weeks
               .filter((w) => w.transfer_week)
@@ -555,5 +563,38 @@ function PlanPanel({ onLoad }: { onLoad: (out: string[], inn: string[]) => void 
         </>
       )}
     </section>
+  );
+}
+
+/** Hur ett byte eller en plan ändrar värdet av kortplanen, per kort. */
+function CardImpactView({ cards, netInclCards }: { cards: CardImpact | null; netInclCards: number }) {
+  if (!cards) return null;
+  const changed = Object.values(cards.per_card).filter((c) => Math.abs(c.change) >= 0.05);
+  if (changed.length === 0) return null;
+  const at = (x: { gameweek: number; gain: number } | null) => (x ? `v.${x.gameweek} ${signed(x.gain)}` : "inte i planen");
+  return (
+    <div className="card-impact">
+      <p className="hint">
+        Kortplanen {signed(cards.change)} xP ({num(cards.value_before)} → {num(cards.value_after)}) · netto inkl. kort{" "}
+        <strong>{signed(netInclCards)} xP</strong>
+      </p>
+      <ul>
+        {changed.map((c) => (
+          <li key={c.name}>
+            <span className={c.change < 0 ? "bad" : "good"}>{c.name}</span> {at(c.before)} → {at(c.after)}{" "}
+            <small>({signed(c.change)})</small>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CardScheduleView({ schedule }: { schedule: CardScheduleItem[] }) {
+  if (!schedule.length) return null;
+  return (
+    <p className="hint">
+      Kort som planen räknar med: {schedule.map((c) => `v.${c.gameweek} ${c.name}`).join(" · ")}
+    </p>
   );
 }

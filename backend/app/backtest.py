@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import exceptions as exc
 from .archive import PredictionArchive
 from .datastore import Snapshot
 from .model import assign_gameweek
@@ -68,9 +69,19 @@ class Week:
     archived_prices: bool = False
 
 
-def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_week: int = 2) -> list[Week]:
+def build_weeks(
+    snap: Snapshot,
+    archive: PredictionArchive | None = None,
+    min_week: int = 2,
+    absences: list[exc.Absence] | None = None,
+) -> list[Week]:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
     games = [{**g, "gameweek": assign_gameweek(g["date"], gameweeks)} for g in snap.games if g["played"]]
+    club_games: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for g in games:
+        club_games[g["home"]].append(g)
+        club_games[g["away"]].append(g)
+    absences_by_player = exc.by_player(absences or [])
     toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
 
     team_games: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
@@ -112,6 +123,22 @@ def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_we
                 for g in games
                 if g["gameweek"] == wk and club in (g["home"], g["away"])
             ]
+            player_weeks = [
+                WeekStat(
+                    w,
+                    past.get(w, {}).get("games", 0),
+                    past.get(w, {}).get("points", 0),
+                    n,
+                    past.get(w, {}).get("pm", 0),
+                    *toi.get(p["id"], {}).get(w, (0, 0)),
+                )
+                for w, n in sorted(team_games[club].items())
+                if w < wk
+            ]
+            # Samma frånvaroundantag som i modellen (exceptions.py)
+            player_weeks, _ = exc.adjust_weeks(
+                player_weeks, exc.excused_team_games(absences_by_player.get(p["id"], []), club_games[club])
+            )
             rows.append(
                 Row(
                     pid=p["id"],
@@ -121,22 +148,11 @@ def build_weeks(snap: Snapshot, archive: PredictionArchive | None = None, min_we
                     games_played=gp,
                     ppg=pts / gp if gp else 0.0,
                     form=form_pts / form_games if form_games else 0.0,
-                    team_games=sum(n for w, n in team_games[club].items() if w < wk),
+                    team_games=sum(w.team_games for w in player_weeks),
                     fixtures=fixtures,
                     actual=actual_week[p["id"]]["points"],
                     cats=_sum_cats(past.values()),
-                    weeks=[
-                        WeekStat(
-                            w,
-                            past.get(w, {}).get("games", 0),
-                            past.get(w, {}).get("points", 0),
-                            n,
-                            past.get(w, {}).get("pm", 0),
-                            *toi.get(p["id"], {}).get(w, (0, 0)),
-                        )
-                        for w, n in sorted(team_games[club].items())
-                        if w < wk
-                    ],
+                    weeks=player_weeks,
                 )
             )
         played_before = [g for g in games if g["gameweek"] and g["gameweek"] < wk]
@@ -201,10 +217,49 @@ def _lineup_actual(preds: list[Prediction], by_prediction: bool) -> int:
     return total
 
 
+BUY_TOP_N = 5  # köpträff: modellens N bästa per position och vecka
+
+
+def _ranks(values: list[float]) -> list[float]:
+    """Rang med medelrang vid lika värden."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = (i + j) / 2
+        i = j + 1
+    return ranks
+
+
+def _spearman(pairs: list[tuple[float, float]]) -> float:
+    if len(pairs) < 3:
+        return 0.0
+    rx = _ranks([x for x, _ in pairs])
+    ry = _ranks([y for _, y in pairs])
+    return _pearson(list(zip(rx, ry)))
+
+
+def _buy_hit(preds: list[Prediction]) -> list[float]:
+    """Per position: faktiska poäng för modellens N bästa som andel av de N faktiskt bästas.
+    Mäter hur bra köpen blir, eftersom man köper de spelare modellen rankar högst."""
+    out = []
+    for pos in LINEUP_COMPOSITION:
+        group = [p for p in preds if p[0] == pos]
+        best = sum(sorted((a for _, _, a in group), reverse=True)[:BUY_TOP_N])
+        if best > 0:
+            chosen = sorted(group, key=lambda p: p[1], reverse=True)[:BUY_TOP_N]
+            out.append(sum(a for _, _, a in chosen) / best)
+    return out
+
+
 def score(weeks_of_predictions: list[list[Prediction]]) -> dict[str, Any]:
     errors, pairs = [], []
     by_pos: dict[str, list[float]] = defaultdict(list)
-    efficiency = []
+    efficiency, rank_corr, buy_hit = [], [], []
     for preds in weeks_of_predictions:
         for pos, xp, actual in preds:
             errors.append(abs(xp - actual))
@@ -213,10 +268,18 @@ def score(weeks_of_predictions: list[list[Prediction]]) -> dict[str, Any]:
         best = _lineup_actual(preds, by_prediction=False)
         if best > 0:
             efficiency.append(_lineup_actual(preds, by_prediction=True) / best)
+        # Rangkorrelation per vecka bland spelare modellen tror spelar (xP > 0)
+        playing = [(xp, a) for _, xp, a in preds if xp > 0]
+        if len(playing) >= 3:
+            rank_corr.append(_spearman(playing))
+        buy_hit.extend(_buy_hit(preds))
+    mean = lambda v: round(sum(v) / len(v), 3) if v else None  # noqa: E731
     return {
         "mae": round(sum(errors) / len(errors), 3) if errors else None,
         "correlation": round(_pearson(pairs), 3) if pairs else None,
-        "lineup_efficiency": round(sum(efficiency) / len(efficiency), 3) if efficiency else None,
+        "rank_correlation": mean(rank_corr),
+        "buy_hit": mean(buy_hit),
+        "lineup_efficiency": mean(efficiency),
         "mae_by_position": {pos: round(sum(v) / len(v), 3) for pos, v in by_pos.items()},
         "samples": len(errors),
     }
@@ -224,6 +287,42 @@ def score(weeks_of_predictions: list[list[Prediction]]) -> dict[str, Any]:
 
 def evaluate(weeks: list[Week], params: Params) -> dict[str, Any]:
     return score([[(r.position, xp, r.actual) for r, xp in predict(w, params)] for w in weeks])
+
+
+def predictions(week: Week, params: Params) -> list[Prediction]:
+    return [(r.position, xp, r.actual) for r, xp in predict(week, params)]
+
+
+ROLLING_START = 5  # första testveckan i den rullande utvärderingen
+
+
+def rolling_evaluation(weeks: list[Week], grid: list[Params], start: int = ROLLING_START) -> dict[str, Any]:
+    """Utvärdering utanför träningsdatan. För varje testvecka k (från `start`) väljs den
+    kandidat i `grid` som hade lägst medelfel på veckorna före k, och den mäts sedan på
+    vecka k. Med en enda kandidat blir det en vanlig mätning på samma testveckor, vilket
+    gör den till en rättvis jämförelse mot dagens modell."""
+    cache: dict[tuple[int, int], list[Prediction]] = {}
+
+    def preds(i: int, week: Week) -> list[Prediction]:
+        key = (i, week.number)
+        if key not in cache:
+            cache[key] = predictions(week, grid[i])
+        return cache[key]
+
+    tested, chosen, per_week = [], [], []
+    for k, week in enumerate(weeks):
+        if week.number < start:
+            continue
+        train = weeks[:k]
+        if len(grid) == 1 or not train:
+            best = 0
+        else:
+            best = min(range(len(grid)), key=lambda i: score([preds(i, w) for w in train])["mae"])
+        p = preds(best, week)
+        tested.append(p)
+        chosen.append(best)
+        per_week.append({"week": week.number, **{m: v for m, v in score([p]).items() if m != "mae_by_position"}})
+    return {**score(tested), "weeks": [w["week"] for w in per_week], "per_week": per_week, "chosen": chosen}
 
 
 def evaluate_archived(snap: Snapshot, archive: PredictionArchive) -> tuple[list[int], dict[str, Any] | None]:
@@ -263,8 +362,9 @@ def report(
     snap: Snapshot,
     params: Params = DEFAULT_PARAMS,
     archive: PredictionArchive | None = None,
+    absences: list[exc.Absence] | None = None,
 ) -> dict[str, Any]:
-    weeks = build_weeks(snap, archive)
+    weeks = build_weeks(snap, archive, absences=absences)
     if not weeks:
         return {"weeks": [], "models": []}
     models = [{"key": key, "name": name, **evaluate(weeks, p)} for key, (name, p) in BASELINES.items()]
@@ -291,6 +391,9 @@ def report(
         "models": models,
         "params": asdict(params),
     }
+    rolling = rolling_evaluation(weeks, [params])
+    if rolling["weeks"]:
+        result["rolling"] = {k: rolling[k] for k in ("weeks", "mae", "correlation", "rank_correlation", "buy_hit", "lineup_efficiency")}
     if archive:
         archived_weeks, archived = evaluate_archived(snap, archive)
         if archived:
@@ -351,16 +454,27 @@ def main() -> None:
     data_dir = Path(get_settings().data_dir)
     snap = DataStore(data_dir).snapshot
     archive = PredictionArchive(data_dir)
-    result = report(snap, archive=archive)
+    absences, _ = exc.load(data_dir)
+    result = report(snap, archive=archive, absences=absences)
     print(f"Testveckor: {result['weeks']}")
-    print(f"{'Modell':40} {'Medelfel':>9} {'Korr.':>6} {'Elva':>6}")
+    print(f"{'Modell':40} {'Medelfel':>9} {'Korr.':>6} {'Rang':>6} {'Köp':>6} {'Elva':>6}")
+
+    def line(name: str, m: dict) -> None:
+        print(
+            f"{name:40} {m['mae']:>9.2f} {m['correlation']:>6.2f} {m['rank_correlation']:>6.2f} "
+            f"{m['buy_hit']:>6.0%} {m['lineup_efficiency']:>6.0%}"
+        )
+
     for m in result["models"]:
-        print(f"{m['name']:40} {m['mae']:>9.2f} {m['correlation']:>6.2f} {m['lineup_efficiency']:>6.0%}")
+        line(m["name"], m)
+    if "rolling" in result:
+        r = result["rolling"]
+        line(f"Rullande, vecka {r['weeks'][0]}–{r['weeks'][-1]} (som används)", r)
     if "archived" in result:
         a = result["archived"]
-        print(f"{a['name'] + ' ' + str(a['weeks']):40} {a['mae']:>9.2f} {a['correlation']:>6.2f} {a['lineup_efficiency']:>6.0%}")
+        line(a["name"] + " " + str(a["weeks"]), a)
     if args.tune:
-        params, res = grid_search(build_weeks(snap, archive), PRIOR_GRID_WITH_ARCHIVED_PRICES)
+        params, res = grid_search(build_weeks(snap, archive, absences=absences), PRIOR_GRID_WITH_ARCHIVED_PRICES)
         print(f"\nBästa parametrar: {params}")
         print(f"  medelfel {res['mae']:.3f}, korrelation {res['correlation']:.3f}, elva {res['lineup_efficiency']:.0%}")
 

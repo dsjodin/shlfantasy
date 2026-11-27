@@ -53,9 +53,11 @@ class ParamStore:
     def last_evaluated_week(self) -> int:
         return self._data().get("last_week", 0)
 
-    def maybe_tune(self, snap: Snapshot, archive: PredictionArchive | None = None) -> dict[str, Any] | None:
+    def maybe_tune(
+        self, snap: Snapshot, archive: PredictionArchive | None = None, absences: list | None = None
+    ) -> dict[str, Any] | None:
         """Prövar nya vikter om en ny matchvecka har slutrapporterats sedan sist."""
-        weeks = build_weeks(snap, archive)
+        weeks = build_weeks(snap, archive, absences=absences)
         if not weeks:
             return None
         latest = weeks[-1].number
