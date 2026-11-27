@@ -8,6 +8,8 @@ Det behövs ingen skrapning av inloggade sidor. Fantasy SHL publicerar en öppen
 
 Appen hämtar allt automatiskt vid start och sedan en gång i timmen. Födelsedatum hämtas om en gång i veckan. Allt sparas i `data/` så att appen fungerar även om källorna ligger nere en stund.
 
+Istiden per spelare och match hämtas från shl.se:s matchrapporter, en gång per spelad match.
+
 Det enda som inte finns öppet är ditt eget lag. Det lägger du in en gång under "Mitt lag" (15 spelare och vad du har kvar i banken). När du sedan gör ett byte här och trycker på "Genomför i mitt lag" uppdateras laget, banken och antalet gratisbyten automatiskt.
 
 ## Flera i familjen
@@ -57,7 +59,18 @@ För utespelare räknas poäng per match kategori för kategori, eftersom katego
 
 Istiden, mer än halva poängen, är alltså nästan helt förutsägbar medan mål och assist till stor del är slump. Därför litar modellen nästan helt på spelarens egen istid, krymper mål och assist hårt mot positionens snitt och ersätter tur-kategorierna helt med snittet. Målvakter räknas som tidigare.
 
-Sammantaget gick medelfelet från 4,38 till 4,16 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,48 och bästa elvan från 46 % till 53 %. Kategorimodellen förbättrade bästa elvan i sju av åtta veckor. Vinsten är störst tidigt i säsongen, när få matcher gör det viktigast att veta vilka poäng som är slump.
+Kategorimodellen förbättrade bästa elvan i sju av åtta veckor. Vinsten är störst tidigt i säsongen, när få matcher gör det viktigast att veta vilka poäng som är slump.
+
+### Matchrapporterna från shl.se
+
+Matchrapporterna har istid, kedja, powerplaymål, powerplayskott och skott per spelare, plus vilken målvakt som startade. Allt testades mot backtesten:
+
+- Istidstrend (minuter per match de senaste två veckorna mot säsongen): bättre eller lika i alla åtta testveckor och bättre i varje vecka från vecka 5. Den räknas in i xP och syns i formtrenden. Mer istid betyder större roll, och det syns innan poängen gör det.
+- Kedja och powerplay: tillförde ingenting utöver modellen. Priset och kategorimodellen fångar rollen redan.
+- Motståndets styrka mätt i skott i stället för mål: bästa elvan svängde kraftigt mellan veckorna och medelfelet blev sämre i fyra veckor. Används inte.
+- Målvakter (startandel, krympning): inget försök förbättrade prognosen. Målvakternas veckopoäng är svåra att förutsäga, och underlaget är litet (17 målvakter).
+
+Sammantaget gick medelfelet från 4,38 till 4,15 poäng per spelare och vecka (matchvecka 2–9), korrelationen från 0,45 till 0,49 och bästa elvan från 46 % till 54 %.
 
 Modellen vet fortfarande ingenting om kedjor, powerplay-roller eller nyheter. Där kommer AI-rådgivaren in: den kan söka på webben efter skador, laguppställningar och målvaktsbesked innan den rekommenderar något, och visar källorna.
 

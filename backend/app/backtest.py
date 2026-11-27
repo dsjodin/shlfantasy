@@ -36,7 +36,7 @@ from .projection import (
     team_strength,
 )
 from .rules import LINEUP_COMPOSITION, POSITIONS
-from .trend import WeekStat, plus_minus_per_game, recent_play_rate
+from .trend import WeekStat, plus_minus_per_game, recent_play_rate, toi_by_week, toi_ratio
 from .trend import compute as compute_trend
 
 FORM_TEAM_GAMES = 5
@@ -68,6 +68,7 @@ class Week:
 def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
     gameweeks = sorted(snap.gameweeks, key=lambda g: g["number"])
     games = [{**g, "gameweek": assign_gameweek(g["date"], gameweeks)} for g in snap.games if g["played"]]
+    toi = toi_by_week(snap.boxscores, {g["id"]: g["gameweek"] for g in games if g["gameweek"]})
 
     team_games: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     for g in games:
@@ -126,6 +127,7 @@ def build_weeks(snap: Snapshot, min_week: int = 2) -> list[Week]:
                             past.get(w, {}).get("points", 0),
                             n,
                             past.get(w, {}).get("pm", 0),
+                            *toi.get(p["id"], {}).get(w, (0, 0)),
                         )
                         for w, n in sorted(team_games[club].items())
                         if w < wk
@@ -170,6 +172,7 @@ def predict(week: Week, params: Params) -> list[tuple[Row, float]]:
             recent_play=recent_play_rate(r.weeks, params.play_half_life),
             ppg_delta=trend.ppg_delta if trend else 0.0,
             pm_per_game=plus_minus_per_game(r.weeks) if r.position != "GK" else 0.0,
+            toi_ratio=toi_ratio(r.weeks) if r.position != "GK" else None,
         )
         mult = sum(game_multiplier(r.position, opp, home, strength, params) for opp, home in r.fixtures)
         out.append((r, per_game * mult))
@@ -237,6 +240,8 @@ def report(snap: Snapshot, params: Params = DEFAULT_PARAMS) -> dict[str, Any]:
     models.append({"key": "no_categories", "name": "Modellen utan kategorivikter (bara PDO)", **evaluate(weeks, no_cat)})
     no_pdo = replace(params, category_model=False, pdo_weight=0.0)
     models.append({"key": "no_pdo", "name": "Modellen utan kategorivikter och PDO", **evaluate(weeks, no_pdo)})
+    no_toi = replace(params, toi_trend_weight=0.0)
+    models.append({"key": "no_toi_trend", "name": "Modellen utan istidstrend", **evaluate(weeks, no_toi)})
     with_points = replace(params, points_trend_weight=POINTS_TREND_WEIGHT_OPTION)
     models.append({"key": "points_trend", "name": "Modellen med poängtrend", **evaluate(weeks, with_points)})
     models.append({"key": "current", "name": "Modellen som används", **evaluate(weeks, params)})

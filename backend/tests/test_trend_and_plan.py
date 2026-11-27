@@ -149,3 +149,43 @@ def test_category_model_trusts_ice_time_but_not_luck():
 def test_model_falls_back_without_categories(model):
     # Testdatan saknar poängfördelning, så modellen ska använda poäng per match som vanligt
     assert all(p.xp_per_game > 0 for p in model.players.values())
+
+
+# ---------------------------------------------------------------- istid från matchrapporter
+
+
+def test_parse_boxscore_reads_toi_per_player():
+    from app.sources.shl import parse_boxscore, parse_toi
+
+    data = {
+        "stats": {
+            "homeTeamValue": [{"TOI": "13:47", "info": {"playerId": 2388}}, {"TOI": "0:00", "info": {"playerId": 1}}],
+            "awayTeamValue": [{"TOI": "20:05", "info": {"playerId": 4135}}],
+        }
+    }
+    assert parse_boxscore(data) == {"2388": 827, "4135": 1205}
+    assert parse_toi("bad") == 0
+    assert parse_boxscore({}) == {}
+
+
+def test_toi_trend_raises_xp_and_direction():
+    from app.trend import toi_by_week, toi_ratio
+
+    toi = toi_by_week({"g1": {"7": 600}, "g2": {"7": 600}, "g3": {"7": 900}, "g4": {"7": 900}}, {"g1": 1, "g2": 1, "g3": 2, "g4": 3})
+    assert toi["7"] == {1: (1200, 2), 2: (900, 1), 3: (900, 1)}
+    weeks = [WeekStat(w, n, 5 * n, n, 0, *toi["7"][w]) for w, n in ((1, 2), (2, 1), (3, 1))]
+    ratio = toi_ratio(weeks)
+    assert ratio is not None and ratio > 1.15
+    trend = compute(weeks, 1.0)
+    assert trend.direction == "up" and "istid" in trend.reason
+    args = {"price": 8.0, "games_played": 4, "ppg": 5.0, "form": 5.0, "team_games": 4, "prior": (1.0, 0.5), "params": DEFAULT_PARAMS}
+    assert expected_per_game(**args, toi_ratio=ratio)[0] > expected_per_game(**args)[0]
+    # Begränsat så att en konstig rapport inte slår för hårt
+    assert expected_per_game(**args, toi_ratio=5.0)[0] <= expected_per_game(**args)[0] * 1.5 + 1e-9
+
+
+def test_toi_trend_needs_recent_games():
+    from app.trend import toi_ratio
+
+    weeks = [WeekStat(1, 4, 20, 4, 0, 4 * 900, 4), WeekStat(2, 0, 0, 2), WeekStat(3, 0, 0, 2)]
+    assert toi_ratio(weeks) is None

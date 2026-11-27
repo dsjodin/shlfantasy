@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 API = "https://www.shl.se/api/sports-v2"
+GAMEDAY_API = "https://www.shl.se/api/gameday"
 
 # Fantasy SHL och shl.se använder olika förkortningar för ett par lag.
 SHL_TO_FANTASY_CLUB = {"OHK": "ÖRE", "SAIK": "SKE"}
@@ -115,3 +116,53 @@ async def fetch_birthdates(
 
     await asyncio.gather(*(one(u) for u in athlete_uuids))
     return result
+
+
+def parse_toi(value: Any) -> int:
+    """'13:47' -> 827 sekunder."""
+    try:
+        minutes, seconds = str(value).split(":")
+        return int(minutes) * 60 + int(seconds)
+    except (ValueError, AttributeError):
+        return 0
+
+
+def parse_boxscore(data: dict[str, Any]) -> dict[str, int]:
+    """Istid i sekunder per utespelare som spelade matchen: {player_id: sekunder}.
+
+    Spelar-id i matchrapporten är samma som Fantasy SHL:s player_shl_id.
+    """
+    result = {}
+    for side in ("homeTeamValue", "awayTeamValue"):
+        for row in (data.get("stats") or {}).get(side) or []:
+            pid = (row.get("info") or {}).get("playerId")
+            toi = parse_toi(row.get("TOI"))
+            if pid and toi:
+                result[str(pid)] = toi
+    return result
+
+
+async def fetch_boxscores(
+    client: httpx.AsyncClient, game_ids: list[str], concurrency: int = 4
+) -> tuple[dict[str, dict[str, int]], list[str]]:
+    """Hämtar matchrapporter för spelade matcher. Returnerar (rapporter, misslyckade id:n)."""
+    sem = asyncio.Semaphore(concurrency)
+    result: dict[str, dict[str, int]] = {}
+    failed: list[str] = []
+
+    async def one(game_id: str) -> None:
+        async with sem:
+            try:
+                response = await client.get(f"{GAMEDAY_API}/boxscore/{game_id}")
+                response.raise_for_status()
+                parsed = parse_boxscore(response.json())
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("Kunde inte hämta matchrapport %s: %s", game_id, exc)
+                failed.append(game_id)
+                return
+        # En tom rapport betyder oftast att den inte är klar än. Försök igen nästa gång.
+        if parsed:
+            result[game_id] = parsed
+
+    await asyncio.gather(*(one(g) for g in game_ids))
+    return result, failed

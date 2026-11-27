@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { mkr, num, signed } from "../format";
+import { minutes, mkr, num, signed } from "../format";
 import type { Player } from "../types";
 import { ClubBadge, PosBadge, StatusChip, TrendArrow } from "./PlayerBits";
 
@@ -83,8 +83,12 @@ export function PlayerDetail({ id, onClose }: { id: string; onClose: () => void 
                 {p.trend.reason}. Senaste veckorna {num(p.trend.recent_ppg)} poäng per match mot{" "}
                 {num(p.trend.season_ppg)} för säsongen ({signed(p.trend.ppg_delta)}). Speltid{" "}
                 {Math.round(p.trend.recent_play_rate * 100)} % av lagets matcher mot{" "}
-                {Math.round(p.trend.season_play_rate * 100)} % för säsongen. Ändrad speltid brukar hålla i sig och
-                räknas in i xP. En het poängperiod brukar inte göra det och räknas därför inte in.
+                {Math.round(p.trend.season_play_rate * 100)} % för säsongen.
+                {p.trend.season_toi && p.trend.recent_toi
+                  ? ` Istid ${minutes(p.trend.recent_toi)} per match de senaste två veckorna mot ${minutes(p.trend.season_toi)} för säsongen.`
+                  : ""}{" "}
+                Ändrad speltid och istid brukar hålla i sig och räknas in i xP. En het poängperiod brukar inte göra det
+                och räknas därför inte in.
               </p>
             )}
             <h4>Poäng per matchvecka</h4>

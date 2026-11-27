@@ -53,6 +53,8 @@ export interface Trend {
   season_play_rate: number;
   recent_play_rate: number;
   weeks: number;
+  season_toi: number | null;
+  recent_toi: number | null;
 }
 
 export interface Issue {
